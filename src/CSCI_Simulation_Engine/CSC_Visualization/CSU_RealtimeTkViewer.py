@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from src.CSCI_Reconfiguration_Decision.CSC_StateBus.CSU_StateBus import StateBus
+from src.CSCI_Simulation_Engine.CSC_Battery import BatteryModel
 from src.CSCI_Simulation_Engine.CSC_Command.CSU_RollCommand import straight_roll_command
 from src.CSCI_Simulation_Engine.CSC_Configuration.CSU_SimConfig import SimConfig
 from src.CSCI_Simulation_Engine.CSC_Dynamics.CSU_PointMassPseudoDynamics import step_uav
@@ -31,6 +32,7 @@ class RealtimeTkViewer:
         self.root.title("Formation Flight 2D Realtime Simulation")
         self.simulation_port = simulation_port or NullSimulationPort()
         self.state_bus = StateBus()
+        self.battery_model = BatteryModel()
 
         self.cfg = SimConfig(dt=0.05, duration=10_000.0, speed_mps=15.0)
         self.uavs = build_initial_uavs(self.cfg.speed_mps)
@@ -53,6 +55,15 @@ class RealtimeTkViewer:
         self.canvas.bind("<Button-4>", self.zoom_in)
         self.canvas.bind("<Button-5>", self.zoom_out)
         self.root.bind("<KeyPress>", self.handle_key)
+
+        self.battery_frame = ttk.Frame(root, padding=(12, 10))
+        self.battery_frame.grid(row=0, column=8, rowspan=2, sticky="nsew")
+        ttk.Label(self.battery_frame, text="UAV Battery", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w")
+        self.battery_table = ttk.Frame(self.battery_frame)
+        self.battery_table.grid(row=1, column=0, pady=(8, 0), sticky="nsew")
+        self.battery_rows: dict[str, tuple[ttk.Label, tk.Label, ttk.Label]] = {}
+        self.build_battery_table_header()
+        self.battery_frame.grid_rowconfigure(1, weight=1)
 
         self.start_button = ttk.Button(root, text="Pause", command=self.toggle_running)
         self.start_button.grid(row=1, column=0, padx=6, pady=8, sticky="ew")
@@ -80,6 +91,7 @@ class RealtimeTkViewer:
         root.grid_columnconfigure(4, weight=1)
         root.grid_columnconfigure(6, weight=1)
         root.grid_rowconfigure(0, weight=1)
+        self.initialize_battery_table()
 
         self.tick()
 
@@ -89,6 +101,7 @@ class RealtimeTkViewer:
         self.camera_x_m = 0.0
         self.camera_y_m = -25.0
         self.follow_camera = self.follow_var.get()
+        self.initialize_battery_table()
 
     def toggle_running(self) -> None:
         self.running = not self.running
@@ -165,6 +178,12 @@ class RealtimeTkViewer:
         for uav in self.uavs:
             uav.record(self.t_s)
             step_uav(uav, straight_roll_command(uav, self.t_s), self.cfg)
+            uav.battery_pct = self.battery_model.update_battery(
+                battery_pct=uav.battery_pct,
+                dt_s=self.cfg.dt,
+                speed_mps=uav.speed_mps,
+                role=uav.role,
+            )
         snapshot = build_snapshot(self.t_s, self.uavs)
         self.state_bus.update_from_simulation_snapshot(snapshot)
         self.simulation_port.publish(snapshot)
@@ -191,6 +210,48 @@ class RealtimeTkViewer:
         self.draw_grid()
         self.draw_uavs()
         self.draw_hud()
+        self.update_battery_table()
+
+    def initialize_battery_table(self) -> None:
+        for widget in self.battery_table.winfo_children():
+            widget.destroy()
+
+        self.battery_rows.clear()
+        self.build_battery_table_header()
+        for uav in self.uavs:
+            row_idx = len(self.battery_rows) + 1
+            form_label = ttk.Label(self.battery_table, text=f"F{uav.formation_id}", width=6, anchor="center")
+            role_label = tk.Label(
+                self.battery_table,
+                text=uav.role,
+                width=8,
+                anchor="center",
+                bg=role_color(uav.role),
+                fg="#ffffff",
+            )
+            battery_label = ttk.Label(self.battery_table, text=f"{uav.battery_pct:5.1f}%", width=9, anchor="e")
+
+            form_label.grid(row=row_idx, column=0, padx=(0, 4), pady=2, sticky="ew")
+            role_label.grid(row=row_idx, column=1, padx=4, pady=2, sticky="ew")
+            battery_label.grid(row=row_idx, column=2, padx=(4, 0), pady=2, sticky="ew")
+            self.battery_rows[uav.uid] = (form_label, role_label, battery_label)
+
+    def update_battery_table(self) -> None:
+        for uav in self.uavs:
+            if uav.uid not in self.battery_rows:
+                self.initialize_battery_table()
+                return
+
+            form_label, role_label, battery_label = self.battery_rows[uav.uid]
+            form_label.configure(text=f"F{uav.formation_id}")
+            role_label.configure(text=uav.role, bg=role_color(uav.role))
+            battery_label.configure(text=f"{uav.battery_pct:5.1f}%")
+
+    def build_battery_table_header(self) -> None:
+        headers = [("Form", 6), ("Role", 8), ("Battery", 9)]
+        for col_idx, (text, width) in enumerate(headers):
+            label = ttk.Label(self.battery_table, text=text, width=width, anchor="center", font=("Arial", 9, "bold"))
+            label.grid(row=0, column=col_idx, padx=4, pady=(0, 4), sticky="ew")
 
     def draw_grid(self) -> None:
         grid_m = 10.0
