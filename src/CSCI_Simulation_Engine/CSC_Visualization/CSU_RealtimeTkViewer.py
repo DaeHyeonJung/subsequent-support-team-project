@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
 import math
 import tkinter as tk
+from datetime import datetime
+from pathlib import Path
 from tkinter import ttk
 
 from src.CSCI_Reconfiguration_Decision.CSC_StateBus.CSU_StateBus import StateBus
@@ -9,12 +12,15 @@ from src.CSCI_Simulation_Engine.CSC_Battery import BatteryModel
 from src.CSCI_Simulation_Engine.CSC_Command.CSU_RollCommand import straight_roll_command
 from src.CSCI_Simulation_Engine.CSC_Configuration.CSU_SimConfig import SimConfig
 from src.CSCI_Simulation_Engine.CSC_Dynamics.CSU_PointMassPseudoDynamics import step_uav
+from src.CSCI_Simulation_Engine.CSC_Failure import KillEvent, RandomKillEventModel
 from src.CSCI_Simulation_Engine.CSC_Interface.CSU_SimulationPort import (
     NullSimulationPort,
     SimulationPort,
+    SimulationSnapshot,
     build_snapshot,
 )
 from src.CSCI_Simulation_Engine.CSC_Models.CSU_UavState import Role, UavState
+from src.CSCI_Simulation_Engine.CSC_Output.CSU_SvgWriter import write_svg
 from src.CSCI_Simulation_Engine.CSC_Scenario.CSU_InitialScenario import build_initial_uavs
 
 
@@ -30,9 +36,12 @@ class RealtimeTkViewer:
     def __init__(self, root: tk.Tk, simulation_port: SimulationPort | None = None) -> None:
         self.root = root
         self.root.title("Formation Flight 2D Realtime Simulation")
+        self.closed = False
         self.simulation_port = simulation_port or NullSimulationPort()
         self.state_bus = StateBus()
         self.battery_model = BatteryModel()
+        self.kill_event_model = RandomKillEventModel()
+        self.recent_kill_events: list[KillEvent] = []
 
         self.cfg = SimConfig(dt=0.05, duration=10_000.0, speed_mps=15.0)
         self.uavs = build_initial_uavs(self.cfg.speed_mps)
@@ -44,6 +53,11 @@ class RealtimeTkViewer:
         self.camera_y_m = -25.0
         self.follow_camera = True
         self.drag_start: tuple[int, int] | None = None
+        self.output_dir: Path
+        self.csv_path: Path
+        self.svg_path: Path
+        self.csv_file = None
+        self.csv_writer: csv.writer | None = None
 
         self.canvas_w = 1180
         self.canvas_h = 720
@@ -58,10 +72,10 @@ class RealtimeTkViewer:
 
         self.battery_frame = ttk.Frame(root, padding=(12, 10))
         self.battery_frame.grid(row=0, column=8, rowspan=2, sticky="nsew")
-        ttk.Label(self.battery_frame, text="UAV Battery", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(self.battery_frame, text="UAV Status", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w")
         self.battery_table = ttk.Frame(self.battery_frame)
         self.battery_table.grid(row=1, column=0, pady=(8, 0), sticky="nsew")
-        self.battery_rows: dict[str, tuple[ttk.Label, tk.Label, ttk.Label]] = {}
+        self.battery_rows: dict[str, tuple[ttk.Label, tk.Label, ttk.Label, tk.Label]] = {}
         self.build_battery_table_header()
         self.battery_frame.grid_rowconfigure(1, weight=1)
 
@@ -92,16 +106,22 @@ class RealtimeTkViewer:
         root.grid_columnconfigure(6, weight=1)
         root.grid_rowconfigure(0, weight=1)
         self.initialize_battery_table()
+        self.start_output_session()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
 
         self.tick()
 
     def reset(self) -> None:
+        self.finish_output_session()
         self.uavs = build_initial_uavs(self.speed_var.get())
+        self.kill_event_model.reset()
+        self.recent_kill_events.clear()
         self.t_s = 0.0
         self.camera_x_m = 0.0
         self.camera_y_m = -25.0
         self.follow_camera = self.follow_var.get()
         self.initialize_battery_table()
+        self.start_output_session()
 
     def toggle_running(self) -> None:
         self.running = not self.running
@@ -169,6 +189,8 @@ class RealtimeTkViewer:
         self.follow_camera = False
 
     def tick(self) -> None:
+        if self.closed:
+            return
         if self.running:
             self.advance_simulation()
         self.draw()
@@ -177,6 +199,9 @@ class RealtimeTkViewer:
     def advance_simulation(self) -> None:
         for uav in self.uavs:
             uav.record(self.t_s)
+            if self.is_killed_uav(uav):
+                continue
+
             step_uav(uav, straight_roll_command(uav, self.t_s), self.cfg)
             uav.battery_pct = self.battery_model.update_battery(
                 battery_pct=uav.battery_pct,
@@ -184,10 +209,89 @@ class RealtimeTkViewer:
                 speed_mps=uav.speed_mps,
                 role=uav.role,
             )
+
+        self.recent_kill_events = self.kill_event_model.apply_due_events(self.t_s, self.uavs)
         snapshot = build_snapshot(self.t_s, self.uavs)
         self.state_bus.update_from_simulation_snapshot(snapshot)
         self.simulation_port.publish(snapshot)
+        self.write_snapshot_csv(snapshot)
         self.t_s += self.cfg.dt
+
+    @staticmethod
+    def is_killed_uav(uav: UavState) -> bool:
+        return uav.vehicle_health == "KILLED"
+
+    def start_output_session(self) -> None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.output_dir = Path("outputs") / f"realtime_{timestamp}"
+        self.csv_path = self.output_dir / "trajectory.csv"
+        self.svg_path = self.output_dir / "trajectory.svg"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.csv_file = self.csv_path.open("w", newline="", encoding="utf-8")
+        self.csv_writer = csv.writer(self.csv_file)
+        self.csv_writer.writerow(
+            [
+                "time_s",
+                "uav_id",
+                "formation_id",
+                "role",
+                "available",
+                "availability_reason",
+                "battery_pct",
+                "link_ok",
+                "vehicle_health",
+                "payload_ok",
+                "x_m",
+                "y_m",
+                "heading_deg",
+                "roll_deg",
+            ]
+        )
+
+    def write_snapshot_csv(self, snapshot: SimulationSnapshot) -> None:
+        if self.csv_writer is None or self.csv_file is None:
+            return
+
+        operational_states = {
+            state.telemetry.uid: state for state in self.state_bus.operational_states(snapshot.time_s)
+        }
+        for uav in snapshot.uavs:
+            operational_state = operational_states.get(uav.uid)
+            available = operational_state.available if operational_state is not None else uav.available
+            unavailable_reason = operational_state.unavailable_reason if operational_state is not None else ""
+            self.csv_writer.writerow(
+                [
+                    f"{snapshot.time_s:.2f}",
+                    uav.uid,
+                    uav.formation_id,
+                    uav.role,
+                    int(available),
+                    unavailable_reason,
+                    f"{uav.battery_pct:.1f}",
+                    int(uav.link_ok),
+                    uav.vehicle_health,
+                    int(uav.payload_ok),
+                    f"{uav.x_m:.3f}",
+                    f"{uav.y_m:.3f}",
+                    f"{math.degrees(uav.heading_rad):.3f}",
+                    f"{math.degrees(uav.roll_rad):.3f}",
+                ]
+            )
+        self.csv_file.flush()
+
+    def finish_output_session(self) -> None:
+        if self.csv_file is not None:
+            self.csv_file.close()
+            self.csv_file = None
+            self.csv_writer = None
+
+        if any(uav.history for uav in self.uavs):
+            write_svg(self.uavs, self.svg_path)
+
+    def close(self) -> None:
+        self.closed = True
+        self.finish_output_session()
+        self.root.destroy()
 
     def world_to_screen(self, x_m: float, y_m: float) -> tuple[float, float]:
         cx = self.canvas_w * 0.48
@@ -199,8 +303,12 @@ class RealtimeTkViewer:
     def update_camera(self) -> None:
         if not self.uavs or not self.follow_camera:
             return
-        lead_x = sum(uav.x_m for uav in self.uavs) / len(self.uavs)
-        lead_y = sum(uav.y_m for uav in self.uavs) / len(self.uavs)
+        tracked_uavs = [uav for uav in self.uavs if not self.is_killed_uav(uav)]
+        if not tracked_uavs:
+            tracked_uavs = self.uavs
+
+        lead_x = sum(uav.x_m for uav in tracked_uavs) / len(tracked_uavs)
+        lead_y = sum(uav.y_m for uav in tracked_uavs) / len(tracked_uavs)
         self.camera_x_m += (lead_x - self.camera_x_m) * 0.04
         self.camera_y_m += (lead_y - self.camera_y_m) * 0.04
 
@@ -230,11 +338,20 @@ class RealtimeTkViewer:
                 fg="#ffffff",
             )
             battery_label = ttk.Label(self.battery_table, text=f"{uav.battery_pct:5.1f}%", width=9, anchor="e")
+            status_label = tk.Label(
+                self.battery_table,
+                text="OK",
+                width=8,
+                anchor="center",
+                bg="#e2e8f0",
+                fg="#0f172a",
+            )
 
             form_label.grid(row=row_idx, column=0, padx=(0, 4), pady=2, sticky="ew")
             role_label.grid(row=row_idx, column=1, padx=4, pady=2, sticky="ew")
-            battery_label.grid(row=row_idx, column=2, padx=(4, 0), pady=2, sticky="ew")
-            self.battery_rows[uav.uid] = (form_label, role_label, battery_label)
+            battery_label.grid(row=row_idx, column=2, padx=4, pady=2, sticky="ew")
+            status_label.grid(row=row_idx, column=3, padx=(4, 0), pady=2, sticky="ew")
+            self.battery_rows[uav.uid] = (form_label, role_label, battery_label, status_label)
 
     def update_battery_table(self) -> None:
         for uav in self.uavs:
@@ -242,13 +359,20 @@ class RealtimeTkViewer:
                 self.initialize_battery_table()
                 return
 
-            form_label, role_label, battery_label = self.battery_rows[uav.uid]
+            form_label, role_label, battery_label, status_label = self.battery_rows[uav.uid]
             form_label.configure(text=f"F{uav.formation_id}")
-            role_label.configure(text=uav.role, bg=role_color(uav.role))
+            role_label.configure(text=uav.role)
             battery_label.configure(text=f"{uav.battery_pct:5.1f}%")
 
+            if self.is_killed_uav(uav):
+                role_label.configure(bg="#000000", fg="#ffffff")
+                status_label.configure(text="KILLED", bg="#dc2626", fg="#ffffff")
+            else:
+                role_label.configure(bg=role_color(uav.role), fg="#ffffff")
+                status_label.configure(text="OK", bg="#e2e8f0", fg="#0f172a")
+
     def build_battery_table_header(self) -> None:
-        headers = [("Form", 6), ("Role", 8), ("Battery", 9)]
+        headers = [("Form", 6), ("Role", 8), ("Battery", 9), ("Status", 8)]
         for col_idx, (text, width) in enumerate(headers):
             label = ttk.Label(self.battery_table, text=text, width=width, anchor="center", font=("Arial", 9, "bold"))
             label.grid(row=0, column=col_idx, padx=4, pady=(0, 4), sticky="ew")
@@ -280,7 +404,10 @@ class RealtimeTkViewer:
         for uav in self.uavs:
             color = role_color(uav.role)
             self.draw_tail(uav, color)
-            self.draw_uav_body(uav, color)
+            if self.is_killed_uav(uav):
+                self.draw_killed_uav_marker(uav)
+            else:
+                self.draw_uav_body(uav, color)
 
     def draw_tail(self, uav: UavState, color: str) -> None:
         cutoff_t = self.t_s - self.tail_seconds
@@ -290,8 +417,8 @@ class RealtimeTkViewer:
 
         max_segments = len(recent) - 1
         for idx in range(max_segments):
-            t0, x0, y0, _, _ = recent[idx]
-            _, x1, y1, _, _ = recent[idx + 1]
+            t0, x0, y0, _, _, _ = recent[idx]
+            _, x1, y1, _, _, _ = recent[idx + 1]
             sx0, sy0 = self.world_to_screen(x0, y0)
             sx1, sy1 = self.world_to_screen(x1, y1)
             age_ratio = (t0 - cutoff_t) / max(self.tail_seconds, 0.1)
@@ -320,6 +447,21 @@ class RealtimeTkViewer:
         self.canvas.create_oval(sx - 4, sy - 4, sx + 4, sy + 4, fill=color, outline="#ffffff", width=1)
         self.canvas.create_line(sx, sy, sx, sy - 30, fill="#334155", width=1)
 
+    def draw_killed_uav_marker(self, uav: UavState) -> None:
+        sx, sy = self.world_to_screen(uav.x_m, uav.y_m)
+        radius = 14
+        self.canvas.create_line(sx - radius, sy - radius, sx + radius, sy + radius, fill="#111827", width=3)
+        self.canvas.create_line(sx - radius, sy + radius, sx + radius, sy - radius, fill="#111827", width=3)
+        self.canvas.create_oval(sx - 18, sy - 18, sx + 18, sy + 18, outline="#dc2626", width=2)
+        self.canvas.create_text(
+            sx + 22,
+            sy - 20,
+            text=f"{uav.uid} KILLED",
+            fill="#991b1b",
+            anchor="w",
+            font=("Arial", 10, "bold"),
+        )
+
     def draw_hud(self) -> None:
         self.canvas.create_text(16, 16, text="Dynamic 2D Plot", fill="#0f172a", anchor="nw", font=("Arial", 16, "bold"))
         self.canvas.create_text(16, 42, text="blue: recon   red: strike   green: decoy", fill="#475569", anchor="nw", font=("Arial", 10))
@@ -331,16 +473,32 @@ class RealtimeTkViewer:
             anchor="nw",
             font=("Arial", 10),
         )
-        available_count = len(self.state_bus.available_uavs(self.t_s))
+        operational_states = self.state_bus.operational_states(self.t_s)
+        available_count = sum(1 for state in operational_states if state.available)
         total_count = len(self.state_bus.latest_telemetry())
-        recon_count = sum(1 for message in self.state_bus.latest_telemetry() if message.role == "recon")
+        available_recon_count = sum(
+            1 for state in operational_states if state.available and state.telemetry.role == "recon"
+        )
         self.canvas.create_text(
             16,
             82,
-            text=f"StateBus: telemetry {total_count} UAVs   available {available_count} UAVs   recon {recon_count} UAVs",
+            text=(
+                f"StateBus: telemetry {total_count} UAVs   available {available_count} UAVs   "
+                f"available recon {available_recon_count} UAVs"
+            ),
             fill="#475569",
             anchor="nw",
             font=("Arial", 10),
+        )
+        killed = [event.uid for event in self.kill_event_model.kill_events]
+        killed_text = "none" if not killed else ", ".join(killed)
+        self.canvas.create_text(
+            16,
+            102,
+            text=f"Kill events: {killed_text}",
+            fill="#991b1b",
+            anchor="nw",
+            font=("Arial", 10, "bold"),
         )
         self.status_var.set(
             f"t = {self.t_s:5.1f} sec    speed = {self.speed_var.get():4.1f} m/s    tail = {self.tail_seconds:4.1f} sec"

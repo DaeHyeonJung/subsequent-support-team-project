@@ -12,10 +12,10 @@ class AvailabilityEvaluator:
     def evaluate(self, message: UavTelemetryMessage, current_time_s: float) -> UavOperationalState:
         if current_time_s - message.time_s > self.telemetry_timeout_s:
             return UavOperationalState(message, False, "TELEMETRY_TIMEOUT")
-        if not message.link_ok:
-            return UavOperationalState(message, False, "LINK_LOSS")
         if message.vehicle_health != "OK":
             return UavOperationalState(message, False, f"VEHICLE_{message.vehicle_health}")
+        if not message.link_ok:
+            return UavOperationalState(message, False, "LINK_LOSS")
         if not message.payload_ok:
             return UavOperationalState(message, False, "PAYLOAD_FAULT")
         if message.battery_pct < self.minimum_battery_pct:

@@ -22,7 +22,7 @@ class UavState:
     vehicle_health: str = "OK"
     payload_ok: bool = True
     roll_rad: float = 0.0
-    history: list[tuple[float, float, float, float, float]] = field(default_factory=list)
+    history: list[tuple[float, float, float, float, float, float]] = field(default_factory=list)
 
     def record(self, t_s: float) -> None:
-        self.history.append((t_s, self.x_m, self.y_m, self.heading_rad, self.roll_rad))
+        self.history.append((t_s, self.x_m, self.y_m, self.heading_rad, self.roll_rad, self.battery_pct))
