@@ -1,0 +1,61 @@
+Formation Flight 실시간 시뮬레이션 실행 방법
+========================================
+
+가장 쉬운 방법
+--------------
+1. C:\Users\hoyad\Desktop\Formation_Flight 폴더를 엽니다.
+2. "실시간시뮬레이션실행.bat" 파일을 더블클릭합니다.
+3. 창이 뜨면 기체들이 오른쪽으로 직진합니다.
+4. 아래쪽에서 UAV Speed와 Tail Length를 조절할 수 있습니다.
+5. 마우스로 화면을 드래그하면 화면을 이동할 수 있습니다.
+6. 마우스 휠로 확대/축소할 수 있습니다.
+7. 키보드 방향키 또는 W/A/S/D로 화면을 이동할 수 있습니다.
+8. Follow 체크를 켜면 카메라가 기체들을 따라갑니다.
+
+
+PowerShell로 실행하는 방법
+-------------------------
+PowerShell은 Windows에서 명령어를 직접 입력하는 프로그램입니다.
+
+1. 키보드에서 Windows 키를 누릅니다.
+2. powershell 을 검색합니다.
+3. Windows PowerShell을 실행합니다.
+4. 아래 명령어를 한 줄씩 입력합니다.
+
+cd C:\Users\hoyad\Desktop\Formation_Flight
+python run_realtime_sim.py
+
+만약 python 명령어가 안 되면 아래처럼 실행합니다.
+
+py run_realtime_sim.py
+
+
+파일로 궤적 저장하는 방법
+-------------------------
+실시간 창이 아니라 CSV와 SVG 결과 파일을 만들고 싶을 때 사용합니다.
+
+cd C:\Users\hoyad\Desktop\Formation_Flight
+python formation_sim.py --output-dir outputs\straight
+
+선회 데모:
+
+python formation_sim.py --turn-demo --output-dir outputs\turn_demo
+
+
+현재 코드 구조
+--------------
+run_realtime_sim.py
+  실시간 화면 실행용 파일입니다.
+
+formation_sim.py
+  CSV와 SVG 결과 저장용 파일입니다.
+
+src\CSCI_Simulation_Engine
+  CSCI 단위 시뮬레이션 엔진입니다.
+
+src\CSCI_Simulation_Engine\CSC_Visualization
+  실시간 2D 화면 표시 기능입니다.
+
+src\CSCI_Reconfiguration_Decision\CSC_StateBus
+  기체별 상태 데이터를 모으는 곳입니다.
+  나중에 재편성 알고리즘은 이 데이터를 읽어서 거리, 운용 가능 여부, 역할 중요도를 판단합니다.
