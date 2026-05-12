@@ -11,7 +11,7 @@ class BatteryDrainConfig:
     base_drain_pct_per_s: float = 0.05
 
     # Speed used as the baseline for speed-dependent battery consumption.
-    reference_speed_mps: float = 20.0
+    reference_speed_mps: float = 15.0
 
     # Keeps a small standby drain even when the UAV is moving slowly.
     min_speed_factor: float = 0.2
@@ -22,8 +22,8 @@ class BatteryDrainConfig:
     # Payload/mission-role factor. Larger factor means faster battery drain.
     role_drain_factor: dict[str, float] = field(
         default_factory=lambda: {
-            "recon": 1.30,
-            "strike": 1.10,
-            "decoy": 1.00,
+            "recon": 1.40,
+            "strike": 1.20,
+            "decoy": 1.10,
         }
     )

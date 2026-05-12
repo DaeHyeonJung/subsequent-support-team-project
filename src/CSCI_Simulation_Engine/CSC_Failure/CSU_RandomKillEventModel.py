@@ -19,7 +19,6 @@ class KillEvent:
 
 
 class RandomKillEventModel:
-    """Selects and applies scheduled random UAV kill events."""
 
     def __init__(self, config: KillEventConfig | None = None) -> None:
         self.config = config or KillEventConfig()
