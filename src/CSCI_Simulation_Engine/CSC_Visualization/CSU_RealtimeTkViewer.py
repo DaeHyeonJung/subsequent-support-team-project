@@ -75,7 +75,7 @@ class RealtimeTkViewer:
         ttk.Label(self.battery_frame, text="UAV Status", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w")
         self.battery_table = ttk.Frame(self.battery_frame)
         self.battery_table.grid(row=1, column=0, pady=(8, 0), sticky="nsew")
-        self.battery_rows: dict[str, tuple[ttk.Label, tk.Label, ttk.Label, tk.Label]] = {}
+        self.battery_rows: dict[str, tuple[ttk.Label, tk.Label, ttk.Label, ttk.Label, tk.Label]] = {}
         self.build_battery_table_header()
         self.battery_frame.grid_rowconfigure(1, weight=1)
 
@@ -203,12 +203,15 @@ class RealtimeTkViewer:
                 continue
 
             step_uav(uav, straight_roll_command(uav, self.t_s), self.cfg)
-            uav.battery_pct = self.battery_model.update_battery(
-                battery_pct=uav.battery_pct,
+            battery_state = self.battery_model.calculate_next_state(
+                discharge_progress=uav.battery_discharge_progress,
                 dt_s=self.cfg.dt,
                 speed_mps=uav.speed_mps,
                 role=uav.role,
             )
+            uav.battery_discharge_progress = battery_state.discharge_progress
+            uav.cell_voltage_v = battery_state.cell_voltage_v
+            uav.battery_pct = battery_state.battery_pct
 
         self.recent_kill_events = self.kill_event_model.apply_due_events(self.t_s, self.uavs)
         snapshot = build_snapshot(self.t_s, self.uavs)
@@ -238,6 +241,8 @@ class RealtimeTkViewer:
                 "available",
                 "availability_reason",
                 "battery_pct",
+                "cell_voltage_v",
+                "battery_discharge_progress",
                 "link_ok",
                 "vehicle_health",
                 "payload_ok",
@@ -268,6 +273,8 @@ class RealtimeTkViewer:
                     int(available),
                     unavailable_reason,
                     f"{uav.battery_pct:.1f}",
+                    f"{uav.cell_voltage_v:.4f}",
+                    f"{uav.battery_discharge_progress:.6f}",
                     int(uav.link_ok),
                     uav.vehicle_health,
                     int(uav.payload_ok),
@@ -338,6 +345,7 @@ class RealtimeTkViewer:
                 fg="#ffffff",
             )
             battery_label = ttk.Label(self.battery_table, text=f"{uav.battery_pct:5.1f}%", width=9, anchor="e")
+            voltage_label = ttk.Label(self.battery_table, text=f"{uav.cell_voltage_v:4.2f}V", width=9, anchor="e")
             status_label = tk.Label(
                 self.battery_table,
                 text="OK",
@@ -350,8 +358,9 @@ class RealtimeTkViewer:
             form_label.grid(row=row_idx, column=0, padx=(0, 4), pady=2, sticky="ew")
             role_label.grid(row=row_idx, column=1, padx=4, pady=2, sticky="ew")
             battery_label.grid(row=row_idx, column=2, padx=4, pady=2, sticky="ew")
-            status_label.grid(row=row_idx, column=3, padx=(4, 0), pady=2, sticky="ew")
-            self.battery_rows[uav.uid] = (form_label, role_label, battery_label, status_label)
+            voltage_label.grid(row=row_idx, column=3, padx=4, pady=2, sticky="ew")
+            status_label.grid(row=row_idx, column=4, padx=(4, 0), pady=2, sticky="ew")
+            self.battery_rows[uav.uid] = (form_label, role_label, battery_label, voltage_label, status_label)
 
     def update_battery_table(self) -> None:
         for uav in self.uavs:
@@ -359,10 +368,11 @@ class RealtimeTkViewer:
                 self.initialize_battery_table()
                 return
 
-            form_label, role_label, battery_label, status_label = self.battery_rows[uav.uid]
+            form_label, role_label, battery_label, voltage_label, status_label = self.battery_rows[uav.uid]
             form_label.configure(text=f"F{uav.formation_id}")
             role_label.configure(text=uav.role)
             battery_label.configure(text=f"{uav.battery_pct:5.1f}%")
+            voltage_label.configure(text=f"{uav.cell_voltage_v:4.2f}V")
 
             if self.is_killed_uav(uav):
                 role_label.configure(bg="#000000", fg="#ffffff")
@@ -372,7 +382,7 @@ class RealtimeTkViewer:
                 status_label.configure(text="OK", bg="#e2e8f0", fg="#0f172a")
 
     def build_battery_table_header(self) -> None:
-        headers = [("Form", 6), ("Role", 8), ("Battery", 9), ("Status", 8)]
+        headers = [("Form", 6), ("Role", 8), ("Battery", 9), ("Voltage", 9), ("Status", 8)]
         for col_idx, (text, width) in enumerate(headers):
             label = ttk.Label(self.battery_table, text=text, width=width, anchor="center", font=("Arial", 9, "bold"))
             label.grid(row=0, column=col_idx, padx=4, pady=(0, 4), sticky="ew")

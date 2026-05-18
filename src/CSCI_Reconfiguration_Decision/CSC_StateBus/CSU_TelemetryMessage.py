@@ -15,6 +15,8 @@ class UavTelemetryMessage:
     speed_mps: float
     roll_rad: float
     battery_pct: float
+    battery_discharge_progress: float
+    cell_voltage_v: float
     link_ok: bool
     vehicle_health: str
     payload_ok: bool

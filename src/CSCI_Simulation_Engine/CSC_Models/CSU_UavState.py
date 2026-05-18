@@ -17,6 +17,8 @@ class UavState:
     heading_rad: float
     speed_mps: float
     battery_pct: float = 100.0
+    battery_discharge_progress: float = 0.0
+    cell_voltage_v: float = 4.283333333333333
     available: bool = True
     link_ok: bool = True
     vehicle_health: str = "OK"

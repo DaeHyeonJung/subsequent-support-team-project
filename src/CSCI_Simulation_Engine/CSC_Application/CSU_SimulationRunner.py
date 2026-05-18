@@ -22,11 +22,14 @@ def run_simulation(
         for uav in uavs:
             uav.record(t_s)
             step_uav(uav, roll_command(uav, t_s), cfg)
-            uav.battery_pct = battery_model.update_battery(
-                battery_pct=uav.battery_pct,
+            battery_state = battery_model.calculate_next_state(
+                discharge_progress=uav.battery_discharge_progress,
                 dt_s=cfg.dt,
                 speed_mps=uav.speed_mps,
                 role=uav.role,
             )
+            uav.battery_discharge_progress = battery_state.discharge_progress
+            uav.cell_voltage_v = battery_state.cell_voltage_v
+            uav.battery_pct = battery_state.battery_pct
 
     return uavs

@@ -17,6 +17,8 @@ class UavSnapshot:
     speed_mps: float
     roll_rad: float
     battery_pct: float
+    battery_discharge_progress: float
+    cell_voltage_v: float
     available: bool
     link_ok: bool
     vehicle_health: str
@@ -53,6 +55,8 @@ def build_snapshot(time_s: float, uavs: list[UavState]) -> SimulationSnapshot:
                 speed_mps=uav.speed_mps,
                 roll_rad=uav.roll_rad,
                 battery_pct=uav.battery_pct,
+                battery_discharge_progress=uav.battery_discharge_progress,
+                cell_voltage_v=uav.cell_voltage_v,
                 available=uav.available,
                 link_ok=uav.link_ok,
                 vehicle_health=uav.vehicle_health,

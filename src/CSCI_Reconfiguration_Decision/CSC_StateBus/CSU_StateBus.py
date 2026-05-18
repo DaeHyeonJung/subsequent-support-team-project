@@ -30,6 +30,8 @@ class StateBus:
                     speed_mps=uav.speed_mps,
                     roll_rad=uav.roll_rad,
                     battery_pct=uav.battery_pct,
+                    battery_discharge_progress=uav.battery_discharge_progress,
+                    cell_voltage_v=uav.cell_voltage_v,
                     link_ok=uav.link_ok,
                     vehicle_health=uav.vehicle_health,
                     payload_ok=uav.payload_ok,
