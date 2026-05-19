@@ -22,9 +22,9 @@ class BatteryDrainConfig:
     # Mission-role weight. Larger weight means a shorter effective discharge time.
     role_weight: dict[str, float] = field(
         default_factory=lambda: {
-            "recon": 1.40,
-            "strike": 1.20,
-            "decoy": 1.10,
+            "recon": 1.30,
+            "strike": 1.10,
+            "decoy": 1.20,
         }
     )
 
