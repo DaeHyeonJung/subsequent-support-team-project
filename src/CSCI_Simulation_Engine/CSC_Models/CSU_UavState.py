@@ -19,6 +19,7 @@ class UavState:
     battery_pct: float = 100.0
     battery_discharge_progress: float = 0.0
     cell_voltage_v: float = 4.283333333333333
+    battery_variation_factor: float = 1.0
     available: bool = True
     link_ok: bool = True
     vehicle_health: str = "OK"

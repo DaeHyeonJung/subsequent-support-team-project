@@ -3,8 +3,8 @@ from __future__ import annotations
 
 ROLE_PRIORITY_WEIGHT: dict[str, float] = {
     "recon": 1.00,
-    "strike": 0.75,
-    "decoy": 0.55,
+    "strike": 0.80,
+    "decoy": 0.70,
 }
 
 

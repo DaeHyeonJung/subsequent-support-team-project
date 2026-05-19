@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
 
+from src.CSCI_Reconfiguration_Decision.CSC_RolePriority import CandidatePriorityEvaluator
 from src.CSCI_Reconfiguration_Decision.CSC_StateBus.CSU_StateBus import StateBus
 from src.CSCI_Simulation_Engine.CSC_Battery import BatteryModel
 from src.CSCI_Simulation_Engine.CSC_Command.CSU_RollCommand import straight_roll_command
@@ -39,6 +40,7 @@ class RealtimeTkViewer:
         self.closed = False
         self.simulation_port = simulation_port or NullSimulationPort()
         self.state_bus = StateBus()
+        self.priority_evaluator = CandidatePriorityEvaluator()
         self.battery_model = BatteryModel()
         self.kill_event_model = RandomKillEventModel()
         self.recent_kill_events: list[KillEvent] = []
@@ -78,6 +80,31 @@ class RealtimeTkViewer:
         self.battery_rows: dict[str, tuple[ttk.Label, tk.Label, ttk.Label, ttk.Label, tk.Label]] = {}
         self.build_battery_table_header()
         self.battery_frame.grid_rowconfigure(1, weight=1)
+        ttk.Label(self.battery_frame, text="Reconfig Priority", font=("Arial", 12, "bold")).grid(
+            row=2,
+            column=0,
+            pady=(14, 0),
+            sticky="w",
+        )
+        self.priority_text = tk.Text(
+            self.battery_frame,
+            width=43,
+            height=18,
+            bg="#f8fafc",
+            fg="#0f172a",
+            font=("Consolas", 9),
+            relief="flat",
+            padx=0,
+            pady=0,
+            wrap="none",
+        )
+        self.priority_text.tag_configure("section", foreground="#0f172a", font=("Consolas", 9, "bold"))
+        self.priority_text.tag_configure("available", foreground="#0f172a")
+        self.priority_text.tag_configure("killed", foreground="#dc2626", font=("Consolas", 9, "bold"))
+        self.priority_text.tag_configure("muted", foreground="#64748b")
+        self.priority_text.configure(state="disabled")
+        self.priority_text.grid(row=3, column=0, pady=(6, 0), sticky="nsew")
+        self.battery_frame.grid_rowconfigure(3, weight=1)
 
         self.start_button = ttk.Button(root, text="Pause", command=self.toggle_running)
         self.start_button.grid(row=1, column=0, padx=6, pady=8, sticky="ew")
@@ -208,6 +235,7 @@ class RealtimeTkViewer:
                 dt_s=self.cfg.dt,
                 speed_mps=uav.speed_mps,
                 role=uav.role,
+                battery_variation_factor=uav.battery_variation_factor,
             )
             uav.battery_discharge_progress = battery_state.discharge_progress
             uav.cell_voltage_v = battery_state.cell_voltage_v
@@ -326,6 +354,7 @@ class RealtimeTkViewer:
         self.draw_uavs()
         self.draw_hud()
         self.update_battery_table()
+        self.update_priority_panel()
 
     def initialize_battery_table(self) -> None:
         for widget in self.battery_table.winfo_children():
@@ -380,6 +409,38 @@ class RealtimeTkViewer:
             else:
                 role_label.configure(bg=role_color(uav.role), fg="#ffffff")
                 status_label.configure(text="OK", bg="#e2e8f0", fg="#0f172a")
+
+    def update_priority_panel(self) -> None:
+        candidates = self.priority_evaluator.rank_candidates(self.state_bus.operational_states(self.t_s))
+        if not candidates:
+            self.set_priority_text([("Waiting for telemetry", "muted")])
+            return
+
+        rows: list[tuple[str, str]] = [("AVAILABLE CANDIDATES", "section"), ("Rank UAV    Role   Score  Batt", "muted")]
+        for rank, candidate in enumerate(candidates, start=1):
+            rows.append(
+                (
+                f"{rank:>2}.  {candidate.uid:<6} {candidate.role:<6} "
+                    f"{candidate.priority_score:.2f}  {candidate.battery_pct:5.1f}%",
+                    "available",
+                )
+            )
+
+        killed_uavs = [uav for uav in self.uavs if self.is_killed_uav(uav)]
+        if killed_uavs:
+            rows.append(("", "muted"))
+            rows.append(("KILLED / EXCLUDED", "section"))
+            for uav in killed_uavs:
+                rows.append((f"XX  {uav.uid:<6} {uav.role:<6} KILLED", "killed"))
+
+        self.set_priority_text(rows)
+
+    def set_priority_text(self, rows: list[tuple[str, str]]) -> None:
+        self.priority_text.configure(state="normal")
+        self.priority_text.delete("1.0", tk.END)
+        for text, tag in rows:
+            self.priority_text.insert(tk.END, f"{text}\n", tag)
+        self.priority_text.configure(state="disabled")
 
     def build_battery_table_header(self) -> None:
         headers = [("Form", 6), ("Role", 8), ("Battery", 9), ("Voltage", 9), ("Status", 8)]

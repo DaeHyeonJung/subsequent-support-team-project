@@ -15,6 +15,7 @@ class BatteryState:
     cell_voltage_v: float
     speed_weight: float
     role_weight: float
+    battery_variation_factor: float
     tau_effective_s: float
 
 
@@ -32,6 +33,7 @@ class BatteryModel:
         dt_s: float,
         speed_mps: float,
         role: str,
+        battery_variation_factor: float = 1.0,
     ) -> float:
         """Return the battery percentage after one simulation step.
 
@@ -45,6 +47,7 @@ class BatteryModel:
             dt_s=dt_s,
             speed_mps=speed_mps,
             role=role,
+            battery_variation_factor=battery_variation_factor,
         )
         return state.battery_pct
 
@@ -54,13 +57,15 @@ class BatteryModel:
         dt_s: float,
         speed_mps: float,
         role: str,
+        battery_variation_factor: float = 1.0,
     ) -> BatteryState:
         """Return the curve-based battery state after one simulation step."""
 
         current_progress = self._clamp_progress(discharge_progress)
         speed_weight = self.calculate_speed_weight(speed_mps)
         role_weight = self.calculate_role_weight(role)
-        tau_effective_s = self.calculate_tau_effective_s(speed_weight, role_weight)
+        safe_variation_factor = max(battery_variation_factor, 1e-9)
+        tau_effective_s = self.calculate_tau_effective_s(speed_weight, role_weight, safe_variation_factor)
 
         if dt_s <= 0.0:
             next_progress = current_progress
@@ -75,6 +80,7 @@ class BatteryModel:
             cell_voltage_v=cell_voltage_v,
             speed_weight=speed_weight,
             role_weight=role_weight,
+            battery_variation_factor=safe_variation_factor,
             tau_effective_s=tau_effective_s,
         )
 
@@ -87,8 +93,13 @@ class BatteryModel:
     def calculate_role_weight(self, role: str) -> float:
         return self.config.role_weight.get(role, 1.0)
 
-    def calculate_tau_effective_s(self, speed_weight: float, role_weight: float) -> float:
-        total_weight = max(speed_weight * role_weight, 1e-9)
+    def calculate_tau_effective_s(
+        self,
+        speed_weight: float,
+        role_weight: float,
+        battery_variation_factor: float = 1.0,
+    ) -> float:
+        total_weight = max(speed_weight * role_weight * battery_variation_factor, 1e-9)
         return self.config.tau_base_s / total_weight
 
     def cell_voltage_at_progress(self, discharge_progress: float) -> float:

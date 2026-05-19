@@ -27,6 +27,7 @@ def run_simulation(
                 dt_s=cfg.dt,
                 speed_mps=uav.speed_mps,
                 role=uav.role,
+                battery_variation_factor=uav.battery_variation_factor,
             )
             uav.battery_discharge_progress = battery_state.discharge_progress
             uav.cell_voltage_v = battery_state.cell_voltage_v
