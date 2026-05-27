@@ -3,12 +3,19 @@ from __future__ import annotations
 import math
 import tkinter as tk
 from tkinter import ttk
+import numpy as np
 
+from src.CSCI_Reconfiguration_Decision.CSC_FormationManagement.CSU_FormationManager import (
+    update_formation_assignments,
+    calculate_formation_render_data,
+    AllocatedSlot,
+)
+from src.CSCI_Simulation_Engine.CSC_Visualization.CSU_FormationRenderer import render_formation_to_canvas
+from src.CSCI_Simulation_Engine.CSC_Visualization.CSU_FormationPanel import FormationPanel
+from src.CSCI_Simulation_Engine.CSC_Visualization.CSU_FormationPanel import resolve_uid
 from src.CSCI_Reconfiguration_Decision.CSC_StateBus.CSU_StateBus import StateBus
 from src.CSCI_Simulation_Engine.CSC_Battery import BatteryModel
-from src.CSCI_Simulation_Engine.CSC_Command.CSU_RollCommand import straight_roll_command
 from src.CSCI_Simulation_Engine.CSC_Configuration.CSU_SimConfig import SimConfig
-from src.CSCI_Simulation_Engine.CSC_Dynamics.CSU_PointMassPseudoDynamics import step_uav
 from src.CSCI_Simulation_Engine.CSC_Interface.CSU_SimulationPort import (
     NullSimulationPort,
     SimulationPort,
@@ -16,6 +23,8 @@ from src.CSCI_Simulation_Engine.CSC_Interface.CSU_SimulationPort import (
 )
 from src.CSCI_Simulation_Engine.CSC_Models.CSU_UavState import Role, UavState
 from src.CSCI_Simulation_Engine.CSC_Scenario.CSU_InitialScenario import build_initial_uavs
+from src.CSCI_Reconfiguration_Decision.CSC_Reconfiguration.CSU_Reconfigurator import trigger_reconfiguration_event
+from src.CSCI_Guidance_Control.CSU_WaypointGuidance import WaypointGuidance
 
 
 def role_color(role: Role) -> str:
@@ -35,6 +44,14 @@ class RealtimeTkViewer:
         self.battery_model = BatteryModel()
 
         self.cfg = SimConfig(dt=0.05, duration=10_000.0, speed_mps=15.0)
+
+        # Guidance Control 초기화
+        self.guidance = WaypointGuidance(
+            max_speed=self.cfg.speed_mps * 0.8,
+            avoidance_radius=8.0,
+            repulsive_gain=20.0
+        )
+
         self.uavs = build_initial_uavs(self.cfg.speed_mps)
         self.t_s = 0.0
         self.running = True
@@ -48,7 +65,7 @@ class RealtimeTkViewer:
         self.canvas_w = 1180
         self.canvas_h = 720
         self.canvas = tk.Canvas(root, width=self.canvas_w, height=self.canvas_h, bg="#f8fafc", highlightthickness=0)
-        self.canvas.grid(row=0, column=0, columnspan=8, sticky="nsew")
+        self.canvas.grid(row=0, column=0, columnspan=9, sticky="nsew")
         self.canvas.bind("<ButtonPress-1>", self.start_drag)
         self.canvas.bind("<B1-Motion>", self.drag_camera)
         self.canvas.bind("<MouseWheel>", self.zoom_with_wheel)
@@ -56,14 +73,10 @@ class RealtimeTkViewer:
         self.canvas.bind("<Button-5>", self.zoom_out)
         self.root.bind("<KeyPress>", self.handle_key)
 
-        self.battery_frame = ttk.Frame(root, padding=(12, 10))
-        self.battery_frame.grid(row=0, column=8, rowspan=2, sticky="nsew")
-        ttk.Label(self.battery_frame, text="UAV Battery", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w")
-        self.battery_table = ttk.Frame(self.battery_frame)
-        self.battery_table.grid(row=1, column=0, pady=(8, 0), sticky="nsew")
-        self.battery_rows: dict[str, tuple[ttk.Label, tk.Label, ttk.Label]] = {}
-        self.build_battery_table_header()
-        self.battery_frame.grid_rowconfigure(1, weight=1)
+        self.assignments: dict[str, AllocatedSlot] = {}
+        
+        self.formation_panel = FormationPanel(root, on_shape_change=self.apply_formation_shape)
+        self.formation_panel.frame.grid(row=0, column=9, rowspan=2, sticky="nsew")
 
         self.start_button = ttk.Button(root, text="Pause", command=self.toggle_running)
         self.start_button.grid(row=1, column=0, padx=6, pady=8, sticky="ew")
@@ -73,27 +86,43 @@ class RealtimeTkViewer:
 
         self.follow_var = tk.BooleanVar(value=True)
         self.follow_check = ttk.Checkbutton(root, text="Follow", variable=self.follow_var, command=self.update_follow)
-        self.follow_check.grid(row=1, column=2, padx=6, pady=8, sticky="ew")
+        self.follow_check.grid(row=1, column=3, padx=6, pady=8, sticky="ew")
 
-        ttk.Label(root, text="UAV Speed").grid(row=1, column=3, padx=6, pady=8, sticky="e")
+        ttk.Label(root, text="UAV Speed").grid(row=1, column=4, padx=6, pady=8, sticky="e")
         self.speed_var = tk.DoubleVar(value=self.cfg.speed_mps)
         self.speed_scale = ttk.Scale(root, from_=5.0, to=35.0, variable=self.speed_var, command=self.update_speed)
-        self.speed_scale.grid(row=1, column=4, padx=6, pady=8, sticky="ew")
+        self.speed_scale.grid(row=1, column=5, padx=6, pady=8, sticky="ew")
 
-        ttk.Label(root, text="Tail Length").grid(row=1, column=5, padx=6, pady=8, sticky="e")
+        ttk.Label(root, text="Tail Length").grid(row=1, column=6, padx=6, pady=8, sticky="e")
         self.tail_var = tk.DoubleVar(value=self.tail_seconds)
         self.tail_scale = ttk.Scale(root, from_=2.0, to=20.0, variable=self.tail_var, command=self.update_tail)
-        self.tail_scale.grid(row=1, column=6, padx=6, pady=8, sticky="ew")
+        self.tail_scale.grid(row=1, column=7, padx=6, pady=8, sticky="ew")
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(root, textvariable=self.status_var).grid(row=1, column=7, padx=10, pady=8, sticky="w")
+        ttk.Label(root, textvariable=self.status_var).grid(row=1, column=8, padx=10, pady=8, sticky="w")
 
-        root.grid_columnconfigure(4, weight=1)
-        root.grid_columnconfigure(6, weight=1)
+        root.grid_columnconfigure(5, weight=1)
+        root.grid_columnconfigure(7, weight=1)
         root.grid_rowconfigure(0, weight=1)
-        self.initialize_battery_table()
 
+        self.apply_formation_shape()
         self.tick()
+
+    def apply_formation_shape(self, shape_type: str | None = None) -> None:
+        if shape_type is None:
+            shape_type = self.formation_panel.get_current_shape()
+        
+        # 통합 매니저를 통해 알고리즘 수행
+        self.assignments = update_formation_assignments(self.uavs, shape_type, spacing_m=10.0)
+        
+        for uid, alloc in self.assignments.items():
+            # 시뮬레이터에서 기체 순간이동 반영
+            uav = next((u for u in self.uavs if u.uid == uid), None)
+            if uav:
+                pass  # 순간이동(Teleport)을 제거하고 advance_simulation에서 Guidance로 이동 처리
+                
+        self.formation_panel.refresh_slot_table(self.assignments)
+        self.formation_panel.initialize_battery_table(self.uavs, self.assignments)
 
     def reset(self) -> None:
         self.uavs = build_initial_uavs(self.speed_var.get())
@@ -101,7 +130,7 @@ class RealtimeTkViewer:
         self.camera_x_m = 0.0
         self.camera_y_m = -25.0
         self.follow_camera = self.follow_var.get()
-        self.initialize_battery_table()
+        self.apply_formation_shape()
 
     def toggle_running(self) -> None:
         self.running = not self.running
@@ -163,6 +192,10 @@ class RealtimeTkViewer:
         elif key == "space":
             self.toggle_running()
             return
+        elif key == "r":
+            self.uavs = trigger_reconfiguration_event(self.uavs, kill_count=3)
+            self.apply_formation_shape()
+            return
         else:
             return
         self.follow_var.set(False)
@@ -175,9 +208,61 @@ class RealtimeTkViewer:
         self.root.after(33, self.tick)
 
     def advance_simulation(self) -> None:
+        current_formation_speed = self.speed_var.get()
+        # 편대의 Y축 직진 기본 속도 벡터 (Feedforward Velocity)
+        base_vel = np.array([0.0, current_formation_speed])
+        
+        # 기체들이 멈칫하지 않고 부드럽게 대형을 맞추도록 상대 속도의 최대치를 제한합니다.
+        self.guidance.max_speed = current_formation_speed * 0.8
+
+        # 편대 전체가 직진 비행(위쪽 방향, Y축)을 유지할 수 있도록 목표 슬롯(target)을 전방으로 이동시킵니다.
+        updated_assignments = {}
+        for uid, alloc in self.assignments.items():
+            updated_assignments[uid] = AllocatedSlot(
+                uid=alloc.uid,
+                form_id=alloc.form_id,
+                slot_index=alloc.slot_index,
+                target_x=alloc.target_x,
+                target_y=alloc.target_y + current_formation_speed * self.cfg.dt,
+                dx=alloc.dx,
+                dy=alloc.dy
+            )
+        self.assignments = updated_assignments
+
+        # 1. 모든 기체의 다음 속도(명령)를 먼저 계산 (동기적 업데이트)
+        vel_commands = []
         for uav in self.uavs:
+            current_pos = np.array([uav.x_m, uav.y_m])
+            
+            if uav.uid in self.assignments:
+                alloc = self.assignments[uav.uid]
+                target_pos = np.array([alloc.target_x, alloc.target_y])
+            else:
+                # 할당되지 않은 기체는 현재 위치를 유지하되 기본 속도로 전진
+                target_pos = current_pos
+                
+            # 자신을 제외한 다른 기체들을 장애물(이웃)로 등록하여 충돌 회피 처리
+            neighbors = [np.array([other.x_m, other.y_m]) for other in self.uavs if other.uid != uav.uid]
+            
+            # guidance는 절대 좌표 기반이 아닌 '슬롯까지의 상대적인 속도 보정값' 역할 수행
+            rel_vel = self.guidance.compute_velocity_command(current_pos, target_pos, neighbors)
+            
+            # 최종 속도 = 편대 기본 직진 속도 + 슬롯 추적 및 회피를 위한 상대 속도
+            vel = base_vel + rel_vel
+            vel_commands.append(vel)
+
+        # 2. 계산된 속도를 바탕으로 실제 기체의 위치와 기수(Heading) 업데이트
+        for i, uav in enumerate(self.uavs):
             uav.record(self.t_s)
-            step_uav(uav, straight_roll_command(uav, self.t_s), self.cfg)
+            
+            vel = vel_commands[i]
+            uav.x_m += vel[0] * self.cfg.dt
+            uav.y_m += vel[1] * self.cfg.dt
+            uav.speed_mps = float(np.linalg.norm(vel))
+            
+            if uav.speed_mps > 0.1:
+                uav.heading_rad = math.atan2(vel[1], vel[0])
+                
             uav.battery_pct = self.battery_model.update_battery(
                 battery_pct=uav.battery_pct,
                 dt_s=self.cfg.dt,
@@ -208,50 +293,10 @@ class RealtimeTkViewer:
         self.update_camera()
         self.canvas.delete("all")
         self.draw_grid()
+        self.draw_slots()
         self.draw_uavs()
         self.draw_hud()
-        self.update_battery_table()
-
-    def initialize_battery_table(self) -> None:
-        for widget in self.battery_table.winfo_children():
-            widget.destroy()
-
-        self.battery_rows.clear()
-        self.build_battery_table_header()
-        for uav in self.uavs:
-            row_idx = len(self.battery_rows) + 1
-            form_label = ttk.Label(self.battery_table, text=f"F{uav.formation_id}", width=6, anchor="center")
-            role_label = tk.Label(
-                self.battery_table,
-                text=uav.role,
-                width=8,
-                anchor="center",
-                bg=role_color(uav.role),
-                fg="#ffffff",
-            )
-            battery_label = ttk.Label(self.battery_table, text=f"{uav.battery_pct:5.1f}%", width=9, anchor="e")
-
-            form_label.grid(row=row_idx, column=0, padx=(0, 4), pady=2, sticky="ew")
-            role_label.grid(row=row_idx, column=1, padx=4, pady=2, sticky="ew")
-            battery_label.grid(row=row_idx, column=2, padx=(4, 0), pady=2, sticky="ew")
-            self.battery_rows[uav.uid] = (form_label, role_label, battery_label)
-
-    def update_battery_table(self) -> None:
-        for uav in self.uavs:
-            if uav.uid not in self.battery_rows:
-                self.initialize_battery_table()
-                return
-
-            form_label, role_label, battery_label = self.battery_rows[uav.uid]
-            form_label.configure(text=f"F{uav.formation_id}")
-            role_label.configure(text=uav.role, bg=role_color(uav.role))
-            battery_label.configure(text=f"{uav.battery_pct:5.1f}%")
-
-    def build_battery_table_header(self) -> None:
-        headers = [("Form", 6), ("Role", 8), ("Battery", 9)]
-        for col_idx, (text, width) in enumerate(headers):
-            label = ttk.Label(self.battery_table, text=text, width=width, anchor="center", font=("Arial", 9, "bold"))
-            label.grid(row=0, column=col_idx, padx=4, pady=(0, 4), sticky="ew")
+        self.formation_panel.update_battery_table(self.uavs, self.assignments)
 
     def draw_grid(self) -> None:
         grid_m = 10.0
@@ -275,6 +320,15 @@ class RealtimeTkViewer:
             self.canvas.create_line(0, sy, self.canvas_w, sy, fill=color)
             self.canvas.create_text(8, sy - 3, text=f"{y:.0f}", fill="#64748b", anchor="w", font=("Arial", 9))
             y += grid_m
+
+    def draw_slots(self) -> None:
+        """현재 편대들의 중심을 계산하여 각 슬롯의 위치를 화면에 시각적으로 표시합니다."""
+        if not hasattr(self, 'assignments') or not self.assignments:
+            return
+            
+        render_data = calculate_formation_render_data(self.uavs, self.assignments)
+        # 독립된 렌더러 모듈에 캔버스와 렌더링 데이터를 넘겨 그리기 위임
+        render_formation_to_canvas(self.canvas, render_data, self.world_to_screen)
 
     def draw_uavs(self) -> None:
         for uav in self.uavs:
