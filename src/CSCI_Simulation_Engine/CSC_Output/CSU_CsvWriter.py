@@ -29,7 +29,7 @@ def write_csv(uavs: list[UavState], path: Path) -> None:
             ]
         )
         for uav in uavs:
-            for t_s, x_m, y_m, heading_rad, roll_rad in uav.history:
+            for t_s, x_m, y_m, heading_rad, roll_rad, battery_pct in uav.history:
                 writer.writerow(
                     [
                         f"{t_s:.2f}",
@@ -37,7 +37,7 @@ def write_csv(uavs: list[UavState], path: Path) -> None:
                         uav.formation_id,
                         uav.role,
                         int(uav.available),
-                        f"{uav.battery_pct:.1f}",
+                        f"{battery_pct:.1f}",
                         int(uav.link_ok),
                         uav.vehicle_health,
                         int(uav.payload_ok),

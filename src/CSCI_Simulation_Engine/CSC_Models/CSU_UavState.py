@@ -17,12 +17,15 @@ class UavState:
     heading_rad: float
     speed_mps: float
     battery_pct: float = 100.0
+    battery_discharge_progress: float = 0.0
+    cell_voltage_v: float = 4.283333333333333
+    battery_variation_factor: float = 1.0
     available: bool = True
     link_ok: bool = True
     vehicle_health: str = "OK"
     payload_ok: bool = True
     roll_rad: float = 0.0
-    history: list[tuple[float, float, float, float, float]] = field(default_factory=list)
+    history: list[tuple[float, float, float, float, float, float]] = field(default_factory=list)
 
     def record(self, t_s: float) -> None:
-        self.history.append((t_s, self.x_m, self.y_m, self.heading_rad, self.roll_rad))
+        self.history.append((t_s, self.x_m, self.y_m, self.heading_rad, self.roll_rad, self.battery_pct))

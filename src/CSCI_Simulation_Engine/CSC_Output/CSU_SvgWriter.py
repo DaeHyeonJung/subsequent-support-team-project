@@ -14,7 +14,7 @@ def role_color(role: Role) -> str:
 
 
 def write_svg(uavs: list[UavState], path: Path) -> None:
-    points = [(x, y) for uav in uavs for _, x, y, _, _ in uav.history]
+    points = [(x, y) for uav in uavs for _, x, y, _, _, _ in uav.history]
     min_x = min(x for x, _ in points)
     max_x = max(x for x, _ in points)
     min_y = min(y for _, y in points)
@@ -44,7 +44,7 @@ def write_svg(uavs: list[UavState], path: Path) -> None:
 
     for uav in uavs:
         color = role_color(uav.role)
-        coords = " ".join(f"{sx(x):.2f},{sy(y):.2f}" for _, x, y, _, _ in uav.history)
+        coords = " ".join(f"{sx(x):.2f},{sy(y):.2f}" for _, x, y, _, _, _ in uav.history)
         start = uav.history[0]
         end = uav.history[-1]
         lines.extend(
