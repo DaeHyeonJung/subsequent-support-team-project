@@ -6,13 +6,19 @@ import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
+import numpy as np
 
 from src.CSCI_Reconfiguration_Decision.CSC_RolePriority import CandidatePriorityEvaluator
+from src.CSCI_Reconfiguration_Decision.CSC_FormationManagement.CSU_FormationManager import (
+    update_formation_assignments,
+    calculate_formation_render_data,
+    AllocatedSlot,
+)
+from src.CSCI_Simulation_Engine.CSC_Visualization.CSU_FormationRenderer import render_formation_to_canvas
+from src.CSCI_Simulation_Engine.CSC_Visualization.CSU_FormationPanel import FormationPanel
 from src.CSCI_Reconfiguration_Decision.CSC_StateBus.CSU_StateBus import StateBus
 from src.CSCI_Simulation_Engine.CSC_Battery import BatteryModel
-from src.CSCI_Simulation_Engine.CSC_Command.CSU_RollCommand import straight_roll_command
 from src.CSCI_Simulation_Engine.CSC_Configuration.CSU_SimConfig import SimConfig
-from src.CSCI_Simulation_Engine.CSC_Dynamics.CSU_PointMassPseudoDynamics import step_uav
 from src.CSCI_Simulation_Engine.CSC_Failure import KillEvent, RandomKillEventModel
 from src.CSCI_Simulation_Engine.CSC_Interface.CSU_SimulationPort import (
     NullSimulationPort,
@@ -23,6 +29,7 @@ from src.CSCI_Simulation_Engine.CSC_Interface.CSU_SimulationPort import (
 from src.CSCI_Simulation_Engine.CSC_Models.CSU_UavState import Role, UavState
 from src.CSCI_Simulation_Engine.CSC_Output.CSU_SvgWriter import write_svg
 from src.CSCI_Simulation_Engine.CSC_Scenario.CSU_InitialScenario import build_initial_uavs
+from src.CSCI_Guidance_Control.CSU_WaypointGuidance import WaypointGuidance
 
 
 def role_color(role: Role) -> str:
@@ -44,8 +51,17 @@ class RealtimeTkViewer:
         self.battery_model = BatteryModel()
         self.kill_event_model = RandomKillEventModel()
         self.recent_kill_events: list[KillEvent] = []
+        self.failure_reconfiguration_applied = False
 
         self.cfg = SimConfig(dt=0.05, duration=10_000.0, speed_mps=15.0)
+
+        # Guidance Control 초기화
+        self.guidance = WaypointGuidance(
+            max_speed=self.cfg.speed_mps * 0.8,
+            avoidance_radius=8.0,
+            repulsive_gain=0.0
+        )
+
         self.uavs = build_initial_uavs(self.cfg.speed_mps)
         self.t_s = 0.0
         self.running = True
@@ -65,6 +81,7 @@ class RealtimeTkViewer:
         self.canvas_h = 720
         self.canvas = tk.Canvas(root, width=self.canvas_w, height=self.canvas_h, bg="#f8fafc", highlightthickness=0)
         self.canvas.grid(row=0, column=0, columnspan=8, sticky="nsew")
+        self.canvas.bind("<Configure>", self.resize_canvas)
         self.canvas.bind("<ButtonPress-1>", self.start_drag)
         self.canvas.bind("<B1-Motion>", self.drag_camera)
         self.canvas.bind("<MouseWheel>", self.zoom_with_wheel)
@@ -79,17 +96,20 @@ class RealtimeTkViewer:
         self.battery_table.grid(row=1, column=0, pady=(8, 0), sticky="nsew")
         self.battery_rows: dict[str, tuple[ttk.Label, tk.Label, ttk.Label, ttk.Label, tk.Label]] = {}
         self.build_battery_table_header()
-        self.battery_frame.grid_rowconfigure(1, weight=1)
+        self.battery_frame.grid_columnconfigure(0, weight=1)
         ttk.Label(self.battery_frame, text="Reconfig Priority", font=("Arial", 12, "bold")).grid(
             row=2,
             column=0,
             pady=(14, 0),
             sticky="w",
         )
+        self.priority_frame = ttk.Frame(self.battery_frame)
+        self.priority_frame.grid(row=3, column=0, pady=(6, 0), sticky="ew")
+        self.priority_frame.grid_columnconfigure(0, weight=1)
         self.priority_text = tk.Text(
-            self.battery_frame,
+            self.priority_frame,
             width=43,
-            height=18,
+            height=16,
             bg="#f8fafc",
             fg="#0f172a",
             font=("Consolas", 9),
@@ -98,13 +118,24 @@ class RealtimeTkViewer:
             pady=0,
             wrap="none",
         )
+        self.priority_scrollbar = ttk.Scrollbar(
+            self.priority_frame,
+            orient="vertical",
+            command=self.priority_text.yview,
+        )
+        self.priority_text.configure(yscrollcommand=self.priority_scrollbar.set)
         self.priority_text.tag_configure("section", foreground="#0f172a", font=("Consolas", 9, "bold"))
         self.priority_text.tag_configure("available", foreground="#0f172a")
         self.priority_text.tag_configure("killed", foreground="#dc2626", font=("Consolas", 9, "bold"))
         self.priority_text.tag_configure("muted", foreground="#64748b")
         self.priority_text.configure(state="disabled")
-        self.priority_text.grid(row=3, column=0, pady=(6, 0), sticky="nsew")
-        self.battery_frame.grid_rowconfigure(3, weight=1)
+        self.priority_text.grid(row=0, column=0, sticky="ew")
+        self.priority_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.assignments: dict[str, AllocatedSlot] = {}
+
+        self.formation_panel = FormationPanel(self.battery_frame, on_shape_change=self.apply_formation_shape)
+        self.formation_panel.frame.grid(row=4, column=0, pady=(14, 0), sticky="new")
+        self.battery_frame.grid_rowconfigure(5, weight=1)
 
         self.start_button = ttk.Button(root, text="Pause", command=self.toggle_running)
         self.start_button.grid(row=1, column=0, padx=6, pady=8, sticky="ew")
@@ -114,29 +145,46 @@ class RealtimeTkViewer:
 
         self.follow_var = tk.BooleanVar(value=True)
         self.follow_check = ttk.Checkbutton(root, text="Follow", variable=self.follow_var, command=self.update_follow)
-        self.follow_check.grid(row=1, column=2, padx=6, pady=8, sticky="ew")
+        self.follow_check.grid(row=1, column=3, padx=6, pady=8, sticky="ew")
 
-        ttk.Label(root, text="UAV Speed").grid(row=1, column=3, padx=6, pady=8, sticky="e")
+        ttk.Label(root, text="UAV Speed").grid(row=1, column=4, padx=6, pady=8, sticky="e")
         self.speed_var = tk.DoubleVar(value=self.cfg.speed_mps)
         self.speed_scale = ttk.Scale(root, from_=5.0, to=35.0, variable=self.speed_var, command=self.update_speed)
-        self.speed_scale.grid(row=1, column=4, padx=6, pady=8, sticky="ew")
+        self.speed_scale.grid(row=1, column=5, padx=6, pady=8, sticky="ew")
 
-        ttk.Label(root, text="Tail Length").grid(row=1, column=5, padx=6, pady=8, sticky="e")
+        ttk.Label(root, text="Tail Length").grid(row=1, column=6, padx=6, pady=8, sticky="e")
         self.tail_var = tk.DoubleVar(value=self.tail_seconds)
         self.tail_scale = ttk.Scale(root, from_=2.0, to=20.0, variable=self.tail_var, command=self.update_tail)
-        self.tail_scale.grid(row=1, column=6, padx=6, pady=8, sticky="ew")
+        self.tail_scale.grid(row=1, column=7, padx=6, pady=8, sticky="ew")
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(root, textvariable=self.status_var).grid(row=1, column=7, padx=10, pady=8, sticky="w")
+        ttk.Label(root, textvariable=self.status_var).grid(row=1, column=2, padx=10, pady=8, sticky="w")
 
-        root.grid_columnconfigure(4, weight=1)
-        root.grid_columnconfigure(6, weight=1)
+        root.grid_columnconfigure(5, weight=1)
+        root.grid_columnconfigure(7, weight=1)
         root.grid_rowconfigure(0, weight=1)
         self.initialize_battery_table()
         self.start_output_session()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
         self.tick()
+
+    def apply_formation_shape(self, shape_type: str | None = None) -> None:
+        if shape_type is None:
+            shape_type = self.formation_panel.get_current_shape()
+        if not shape_type:
+            self.assignments = {}
+            return
+
+        # 통합 매니저를 통해 알고리즘 수행
+        active_uavs = [uav for uav in self.uavs if not self.is_killed_uav(uav)]
+        self.assignments = update_formation_assignments(active_uavs, shape_type, spacing_m=10.0)
+
+        for uid, alloc in self.assignments.items():
+            # 시뮬레이터에서 기체 순간이동 반영
+            uav = next((u for u in self.uavs if u.uid == uid), None)
+            if uav:
+                pass  # 순간이동(Teleport)을 제거하고 advance_simulation에서 Guidance로 이동 처리
 
     def reset(self) -> None:
         self.finish_output_session()
@@ -147,6 +195,9 @@ class RealtimeTkViewer:
         self.camera_x_m = 0.0
         self.camera_y_m = -25.0
         self.follow_camera = self.follow_var.get()
+        self.assignments = {}
+        self.failure_reconfiguration_applied = False
+        self.formation_panel.clear_selection()
         self.initialize_battery_table()
         self.start_output_session()
 
@@ -224,12 +275,67 @@ class RealtimeTkViewer:
         self.root.after(33, self.tick)
 
     def advance_simulation(self) -> None:
+        current_formation_speed = self.speed_var.get()
+        # 편대의 Y축 직진 기본 속도 벡터 (Feedforward Velocity)
+        base_vel = np.array([0.0, current_formation_speed])
+
+        # 기체들이 멈칫하지 않고 부드럽게 대형을 맞추도록 상대 속도의 최대치를 제한합니다.
+        self.guidance.max_speed = current_formation_speed * 0.8
+
+        # 편대 전체가 직진 비행(위쪽 방향, Y축)을 유지할 수 있도록 목표 슬롯(target)을 전방으로 이동시킵니다.
+        if self.assignments:
+            updated_assignments = {}
+            for uid, alloc in self.assignments.items():
+                updated_assignments[uid] = AllocatedSlot(
+                    uid=alloc.uid,
+                    form_id=alloc.form_id,
+                    slot_index=alloc.slot_index,
+                    target_x=alloc.target_x,
+                    target_y=alloc.target_y + current_formation_speed * self.cfg.dt,
+                    dx=alloc.dx,
+                    dy=alloc.dy
+                )
+            self.assignments = updated_assignments
+
+        # 1. 모든 기체의 다음 속도(명령)를 먼저 계산 (동기적 업데이트)
+        vel_commands = []
         for uav in self.uavs:
+            current_pos = np.array([uav.x_m, uav.y_m])
+
+            if uav.uid in self.assignments:
+                alloc = self.assignments[uav.uid]
+                target_pos = np.array([alloc.target_x, alloc.target_y])
+            else:
+                # 할당되지 않은 기체는 현재 위치를 유지하되 기본 속도로 전진
+                target_pos = current_pos
+
+            # 자신을 제외한 다른 기체들을 장애물(이웃)로 등록하여 충돌 회피 처리
+            neighbors = [np.array([other.x_m, other.y_m]) for other in self.uavs if other.uid != uav.uid]
+
+            # guidance는 절대 좌표 기반이 아닌 '슬롯까지의 상대적인 속도 보정값' 역할 수행
+            rel_vel = self.guidance.compute_velocity_command(current_pos, target_pos, neighbors)
+
+            # 최종 속도 = 편대 기본 직진 속도 + 슬롯 추적 및 회피를 위한 상대 속도
+            vel = base_vel + rel_vel
+            vel_commands.append(vel)
+
+        if not self.assignments:
+            vel_commands = [base_vel for _ in self.uavs]
+
+        # 2. 계산된 속도를 바탕으로 실제 기체의 위치와 기수(Heading) 업데이트
+        for i, uav in enumerate(self.uavs):
             uav.record(self.t_s)
             if self.is_killed_uav(uav):
                 continue
 
-            step_uav(uav, straight_roll_command(uav, self.t_s), self.cfg)
+            vel = vel_commands[i]
+            uav.x_m += vel[0] * self.cfg.dt
+            uav.y_m += vel[1] * self.cfg.dt
+            uav.speed_mps = float(np.linalg.norm(vel))
+
+            if uav.speed_mps > 0.1:
+                uav.heading_rad = math.atan2(vel[1], vel[0])
+
             battery_state = self.battery_model.calculate_next_state(
                 discharge_progress=uav.battery_discharge_progress,
                 dt_s=self.cfg.dt,
@@ -242,6 +348,16 @@ class RealtimeTkViewer:
             uav.battery_pct = battery_state.battery_pct
 
         self.recent_kill_events = self.kill_event_model.apply_due_events(self.t_s, self.uavs)
+        if (
+            not self.failure_reconfiguration_applied
+            and len(self.kill_event_model.kill_events) >= self.kill_event_model.config.total_kills
+        ):
+            for uav in self.uavs:
+                if not self.is_killed_uav(uav):
+                    uav.formation_id = 1
+            self.failure_reconfiguration_applied = True
+            self.formation_panel.set_selection("line")
+            self.apply_formation_shape("line")
         snapshot = build_snapshot(self.t_s, self.uavs)
         self.state_bus.update_from_simulation_snapshot(snapshot)
         self.simulation_port.publish(snapshot)
@@ -328,6 +444,10 @@ class RealtimeTkViewer:
         self.finish_output_session()
         self.root.destroy()
 
+    def resize_canvas(self, event: tk.Event) -> None:
+        self.canvas_w = max(event.width, 1)
+        self.canvas_h = max(event.height, 1)
+
     def world_to_screen(self, x_m: float, y_m: float) -> tuple[float, float]:
         cx = self.canvas_w * 0.48
         cy = self.canvas_h * 0.52
@@ -351,6 +471,7 @@ class RealtimeTkViewer:
         self.update_camera()
         self.canvas.delete("all")
         self.draw_grid()
+        self.draw_slots()
         self.draw_uavs()
         self.draw_hud()
         self.update_battery_table()
@@ -471,6 +592,15 @@ class RealtimeTkViewer:
             self.canvas.create_text(8, sy - 3, text=f"{y:.0f}", fill="#64748b", anchor="w", font=("Arial", 9))
             y += grid_m
 
+    def draw_slots(self) -> None:
+        """현재 편대들의 중심을 계산하여 각 슬롯의 위치를 화면에 시각적으로 표시합니다."""
+        if not hasattr(self, 'assignments') or not self.assignments:
+            return
+
+        render_data = calculate_formation_render_data(self.uavs, self.assignments)
+        # 독립된 렌더러 모듈에 캔버스와 렌더링 데이터를 넘겨 그리기 위임
+        render_formation_to_canvas(self.canvas, render_data, self.world_to_screen)
+
     def draw_uavs(self) -> None:
         for uav in self.uavs:
             color = role_color(uav.role)
@@ -534,43 +664,6 @@ class RealtimeTkViewer:
         )
 
     def draw_hud(self) -> None:
-        self.canvas.create_text(16, 16, text="Dynamic 2D Plot", fill="#0f172a", anchor="nw", font=("Arial", 16, "bold"))
-        self.canvas.create_text(16, 42, text="blue: recon   red: strike   green: decoy", fill="#475569", anchor="nw", font=("Arial", 10))
-        self.canvas.create_text(
-            16,
-            62,
-            text="drag: pan   mouse wheel: zoom   arrow/WASD: move view   space: pause",
-            fill="#64748b",
-            anchor="nw",
-            font=("Arial", 10),
-        )
-        operational_states = self.state_bus.operational_states(self.t_s)
-        available_count = sum(1 for state in operational_states if state.available)
-        total_count = len(self.state_bus.latest_telemetry())
-        available_recon_count = sum(
-            1 for state in operational_states if state.available and state.telemetry.role == "recon"
-        )
-        self.canvas.create_text(
-            16,
-            82,
-            text=(
-                f"StateBus: telemetry {total_count} UAVs   available {available_count} UAVs   "
-                f"available recon {available_recon_count} UAVs"
-            ),
-            fill="#475569",
-            anchor="nw",
-            font=("Arial", 10),
-        )
-        killed = [event.uid for event in self.kill_event_model.kill_events]
-        killed_text = "none" if not killed else ", ".join(killed)
-        self.canvas.create_text(
-            16,
-            102,
-            text=f"Kill events: {killed_text}",
-            fill="#991b1b",
-            anchor="nw",
-            font=("Arial", 10, "bold"),
-        )
         self.status_var.set(
             f"t = {self.t_s:5.1f} sec    speed = {self.speed_var.get():4.1f} m/s    tail = {self.tail_seconds:4.1f} sec"
         )
