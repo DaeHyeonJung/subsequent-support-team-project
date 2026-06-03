@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from src.CSCI_Reconfiguration_Decision.CSC_RolePriority.CSU_RolePriority import get_role_priority_weight
+from src.CSCI_Reconfiguration_Decision.CSC_RolePriority.CSU_RolePriority import (
+    ROLE_PRIORITY_WEIGHT,
+    get_role_priority_weight,
+)
 from src.CSCI_Reconfiguration_Decision.CSC_StateBus.CSU_OperationalState import UavOperationalState
 
 
@@ -29,8 +32,19 @@ class ReconfigurationCandidate:
 
 
 class CandidatePriorityEvaluator:
-    def __init__(self, config: CandidatePriorityConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: CandidatePriorityConfig | None = None,
+        role_priority_weights: Mapping[str, float] | None = None,
+    ) -> None:
         self.config = config or CandidatePriorityConfig()
+        self.role_priority_weights = dict(role_priority_weights or ROLE_PRIORITY_WEIGHT)
+
+    def set_role_priority_weight(self, role: str, weight: float) -> None:
+        self.role_priority_weights[role] = self._clamp_unit(weight)
+
+    def get_role_priority_weights(self) -> dict[str, float]:
+        return dict(self.role_priority_weights)
 
     def rank_candidates(self, operational_states: Iterable[UavOperationalState]) -> list[ReconfigurationCandidate]:
         candidates = [
@@ -42,7 +56,7 @@ class CandidatePriorityEvaluator:
 
     def evaluate_candidate(self, state: UavOperationalState) -> ReconfigurationCandidate:
         telemetry = state.telemetry
-        role_score = self._clamp_unit(get_role_priority_weight(telemetry.role))
+        role_score = self._clamp_unit(get_role_priority_weight(telemetry.role, self.role_priority_weights))
         battery_score = self._clamp_unit(telemetry.battery_pct / 100.0)
         priority_score = self._weighted_score(role_score, battery_score)
         priority_reason = f"role={role_score:.2f}, battery={battery_score:.2f}"
