@@ -8,7 +8,7 @@ from pathlib import Path
 from tkinter import ttk
 import numpy as np
 
-from src.CSCI_Reconfiguration_Decision.CSC_RolePriority import CandidatePriorityEvaluator
+from src.CSCI_Reconfiguration_Decision.CSC_RolePriority import CandidatePriorityEvaluator, ROLE_PRIORITY_WEIGHT
 from src.CSCI_Reconfiguration_Decision.CSC_FormationManagement.CSU_FormationManager import (
     update_formation_assignments,
     calculate_formation_render_data,
@@ -63,6 +63,7 @@ class RealtimeTkViewer:
         )
 
         self.uavs = build_initial_uavs(self.cfg.speed_mps)
+        self.display_formation_ids = {uav.uid: uav.formation_id for uav in self.uavs}
         self.t_s = 0.0
         self.running = True
         self.scale_px_per_m = 6.2
@@ -77,8 +78,8 @@ class RealtimeTkViewer:
         self.csv_file = None
         self.csv_writer: csv.writer | None = None
 
-        self.canvas_w = 1180
-        self.canvas_h = 720
+        self.canvas_w = 920
+        self.canvas_h = 600
         self.canvas = tk.Canvas(root, width=self.canvas_w, height=self.canvas_h, bg="#f8fafc", highlightthickness=0)
         self.canvas.grid(row=0, column=0, columnspan=8, sticky="nsew")
         self.canvas.bind("<Configure>", self.resize_canvas)
@@ -89,8 +90,16 @@ class RealtimeTkViewer:
         self.canvas.bind("<Button-5>", self.zoom_out)
         self.root.bind("<KeyPress>", self.handle_key)
 
-        self.battery_frame = ttk.Frame(root, padding=(12, 10))
-        self.battery_frame.grid(row=0, column=8, rowspan=2, sticky="nsew")
+        self.sidebar_canvas = tk.Canvas(root, width=360, highlightthickness=0)
+        self.sidebar_scrollbar = ttk.Scrollbar(root, orient="vertical", command=self.sidebar_canvas.yview)
+        self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
+        self.sidebar_canvas.grid(row=0, column=8, rowspan=2, sticky="nsew")
+        self.sidebar_scrollbar.grid(row=0, column=9, rowspan=2, sticky="ns")
+
+        self.battery_frame = ttk.Frame(self.sidebar_canvas, padding=(12, 10))
+        self.sidebar_window = self.sidebar_canvas.create_window((0, 0), window=self.battery_frame, anchor="nw")
+        self.battery_frame.bind("<Configure>", self.update_sidebar_scrollregion)
+        self.sidebar_canvas.bind("<Configure>", self.resize_sidebar_frame)
         ttk.Label(self.battery_frame, text="UAV Status", font=("Arial", 12, "bold")).grid(row=0, column=0, sticky="w")
         self.battery_table = ttk.Frame(self.battery_frame)
         self.battery_table.grid(row=1, column=0, pady=(8, 0), sticky="nsew")
@@ -109,33 +118,27 @@ class RealtimeTkViewer:
         self.priority_text = tk.Text(
             self.priority_frame,
             width=43,
-            height=16,
+            height=14,
             bg="#f8fafc",
             fg="#0f172a",
-            font=("Consolas", 9),
+            font=("Consolas", 12),
             relief="flat",
             padx=0,
             pady=0,
             wrap="none",
         )
-        self.priority_scrollbar = ttk.Scrollbar(
-            self.priority_frame,
-            orient="vertical",
-            command=self.priority_text.yview,
-        )
-        self.priority_text.configure(yscrollcommand=self.priority_scrollbar.set)
-        self.priority_text.tag_configure("section", foreground="#0f172a", font=("Consolas", 9, "bold"))
+        self.priority_text.tag_configure("section", foreground="#0f172a", font=("Consolas", 11, "bold"))
         self.priority_text.tag_configure("available", foreground="#0f172a")
-        self.priority_text.tag_configure("killed", foreground="#dc2626", font=("Consolas", 9, "bold"))
+        self.priority_text.tag_configure("killed", foreground="#dc2626", font=("Consolas", 11, "bold"))
         self.priority_text.tag_configure("muted", foreground="#64748b")
         self.priority_text.configure(state="disabled")
         self.priority_text.grid(row=0, column=0, sticky="ew")
-        self.priority_scrollbar.grid(row=0, column=1, sticky="ns")
         self.assignments: dict[str, AllocatedSlot] = {}
 
         self.formation_panel = FormationPanel(self.battery_frame, on_shape_change=self.apply_formation_shape)
         self.formation_panel.frame.grid(row=4, column=0, pady=(14, 0), sticky="new")
-        self.battery_frame.grid_rowconfigure(5, weight=1)
+        self.build_role_weight_controls()
+        self.battery_frame.grid_rowconfigure(6, weight=1)
 
         self.start_button = ttk.Button(root, text="Pause", command=self.toggle_running)
         self.start_button.grid(row=1, column=0, padx=6, pady=8, sticky="ew")
@@ -169,6 +172,87 @@ class RealtimeTkViewer:
 
         self.tick()
 
+    def update_sidebar_scrollregion(self, _: tk.Event | None = None) -> None:
+        self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all"))
+
+    def resize_sidebar_frame(self, event: tk.Event) -> None:
+        self.sidebar_canvas.itemconfigure(self.sidebar_window, width=event.width)
+
+    def build_role_weight_controls(self) -> None:
+        self.role_weight_frame = ttk.Frame(self.battery_frame)
+        self.role_weight_frame.grid(row=5, column=0, pady=(14, 0), sticky="new")
+        self.role_weight_frame.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(self.role_weight_frame, text="Role Weight", font=("Arial", 12, "bold")).grid(
+            row=0,
+            column=0,
+            columnspan=3,
+            sticky="w",
+        )
+
+        self.role_weight_vars: dict[str, tk.DoubleVar] = {}
+        self.role_weight_value_labels: dict[str, ttk.Label] = {}
+        current_weights = self.priority_evaluator.get_role_priority_weights()
+        for row_idx, role in enumerate(ROLE_PRIORITY_WEIGHT, start=1):
+            value = current_weights.get(role, ROLE_PRIORITY_WEIGHT[role])
+            self.role_weight_vars[role] = tk.DoubleVar(value=value)
+
+            role_label = tk.Label(
+                self.role_weight_frame,
+                text=role.title(),
+                width=8,
+                anchor="center",
+                bg=role_color(role),
+                fg="#ffffff",
+            )
+            role_label.grid(row=row_idx, column=0, padx=(0, 8), pady=3, sticky="ew")
+
+            scale = ttk.Scale(
+                self.role_weight_frame,
+                from_=0.0,
+                to=1.0,
+                variable=self.role_weight_vars[role],
+                command=lambda raw_value, selected_role=role: self.update_role_weight(selected_role, raw_value),
+            )
+            scale.bind(
+                "<Button-1>",
+                lambda event, selected_role=role, selected_scale=scale: self.set_role_weight_from_pointer(
+                    selected_role,
+                    selected_scale,
+                    event,
+                ),
+            )
+            scale.bind(
+                "<B1-Motion>",
+                lambda event, selected_role=role, selected_scale=scale: self.set_role_weight_from_pointer(
+                    selected_role,
+                    selected_scale,
+                    event,
+                ),
+            )
+            scale.grid(row=row_idx, column=1, pady=3, sticky="ew")
+
+            value_label = ttk.Label(self.role_weight_frame, text=f"{value:.1f}", width=4, anchor="e")
+            value_label.grid(row=row_idx, column=2, padx=(8, 0), pady=3, sticky="e")
+            self.role_weight_value_labels[role] = value_label
+
+    def set_role_weight_from_pointer(self, role: str, scale: ttk.Scale, event: tk.Event) -> str:
+        width = max(scale.winfo_width(), 1)
+        ratio = max(0.0, min(1.0, event.x / width))
+        self.update_role_weight(role, str(ratio))
+        return "break"
+
+    def update_role_weight(self, role: str, raw_value: str) -> None:
+        stepped_value = round(float(raw_value) * 10.0) / 10.0
+        stepped_value = max(0.0, min(1.0, stepped_value))
+
+        current_value = self.role_weight_vars[role].get()
+        if abs(current_value - stepped_value) > 1e-9:
+            self.role_weight_vars[role].set(stepped_value)
+
+        self.role_weight_value_labels[role].configure(text=f"{stepped_value:.1f}")
+        self.priority_evaluator.set_role_priority_weight(role, stepped_value)
+
     def apply_formation_shape(self, shape_type: str | None = None) -> None:
         if shape_type is None:
             shape_type = self.formation_panel.get_current_shape()
@@ -189,6 +273,7 @@ class RealtimeTkViewer:
     def reset(self) -> None:
         self.finish_output_session()
         self.uavs = build_initial_uavs(self.speed_var.get())
+        self.display_formation_ids = {uav.uid: uav.formation_id for uav in self.uavs}
         self.kill_event_model.reset()
         self.recent_kill_events.clear()
         self.t_s = 0.0
@@ -485,7 +570,12 @@ class RealtimeTkViewer:
         self.build_battery_table_header()
         for uav in self.uavs:
             row_idx = len(self.battery_rows) + 1
-            form_label = ttk.Label(self.battery_table, text=f"F{uav.formation_id}", width=6, anchor="center")
+            form_label = ttk.Label(
+                self.battery_table,
+                text=f"F{self.display_formation_ids.get(uav.uid, uav.formation_id)}",
+                width=6,
+                anchor="center",
+            )
             role_label = tk.Label(
                 self.battery_table,
                 text=uav.role,
@@ -519,7 +609,7 @@ class RealtimeTkViewer:
                 return
 
             form_label, role_label, battery_label, voltage_label, status_label = self.battery_rows[uav.uid]
-            form_label.configure(text=f"F{uav.formation_id}")
+            form_label.configure(text=f"F{self.display_formation_ids.get(uav.uid, uav.formation_id)}")
             role_label.configure(text=uav.role)
             battery_label.configure(text=f"{uav.battery_pct:5.1f}%")
             voltage_label.configure(text=f"{uav.cell_voltage_v:4.2f}V")
@@ -559,8 +649,9 @@ class RealtimeTkViewer:
     def set_priority_text(self, rows: list[tuple[str, str]]) -> None:
         self.priority_text.configure(state="normal")
         self.priority_text.delete("1.0", tk.END)
-        for text, tag in rows:
-            self.priority_text.insert(tk.END, f"{text}\n", tag)
+        for row_idx, (text, tag) in enumerate(rows):
+            line_end = "\n" if row_idx < len(rows) - 1 else ""
+            self.priority_text.insert(tk.END, f"{text}{line_end}", tag)
         self.priority_text.configure(state="disabled")
 
     def build_battery_table_header(self) -> None:
