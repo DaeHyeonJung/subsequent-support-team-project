@@ -47,3 +47,38 @@ def allocate_slots_with_constraints(
         allocation_map[uav.uid] = slot
         
     return allocation_map
+
+def allocate_slots_by_role(
+    uavs: list[UavState], 
+    slots: list[SlotOffset],
+    center_x: float,
+    center_y: float,
+    mean_dx: float,
+    mean_dy: float,
+    role_weights: dict[str, float]
+) -> dict[str, SlotOffset]:
+    """
+    역할(Role) 가중치에 따라 우선순위가 높은 역할에 전방 슬롯을 먼저 블록 단위로 할당하고,
+    동일 역할 내에서는 Fair 헝가리안 알고리즘을 수행하여 최적 배정합니다.
+    """
+    allocation_map: dict[str, SlotOffset] = {}
+    role_groups: dict[str, list[UavState]] = {}
+    for u in uavs:
+        role_groups.setdefault(u.role, []).append(u)
+        
+    sorted_roles = sorted(role_groups.keys(), key=lambda r: role_weights.get(r, 0.0), reverse=True)
+    sorted_slots = sorted(slots, key=lambda s: s.slot_index)
+    
+    slot_idx = 0
+    for role in sorted_roles:
+        uavs_in_role = role_groups[role]
+        num_uavs = len(uavs_in_role)
+        role_slots = sorted_slots[slot_idx : slot_idx + num_uavs]
+        slot_idx += num_uavs
+        
+        role_alloc = allocate_slots_with_constraints(
+            uavs_in_role, role_slots, center_x, center_y, mean_dx, mean_dy
+        )
+        allocation_map.update(role_alloc)
+        
+    return allocation_map

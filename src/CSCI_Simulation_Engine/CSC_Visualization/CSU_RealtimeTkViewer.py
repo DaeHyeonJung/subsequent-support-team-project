@@ -394,7 +394,12 @@ class RealtimeTkViewer:
 
         # 통합 매니저를 통해 알고리즘 수행
         active_uavs = [uav for uav in self.uavs if not self.is_killed_uav(uav)]
-        self.assignments = update_formation_assignments(active_uavs, shape_type, spacing_m=10.0)
+        self.assignments = update_formation_assignments(
+            active_uavs,
+            shape_type,
+            spacing_m=10.0,
+            role_weights=self.confirmed_role_weights,
+        )
 
         for uid, alloc in self.assignments.items():
             # 시뮬레이터에서 기체 순간이동 반영
