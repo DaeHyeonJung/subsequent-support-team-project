@@ -15,7 +15,6 @@ from src.CSCI_Reconfiguration_Decision.CSC_FormationManagement.CSU_FormationMana
     AllocatedSlot,
 )
 from src.CSCI_Simulation_Engine.CSC_Visualization.CSU_FormationRenderer import render_formation_to_canvas
-from src.CSCI_Simulation_Engine.CSC_Visualization.CSU_FormationPanel import FormationPanel
 from src.CSCI_Reconfiguration_Decision.CSC_StateBus.CSU_StateBus import StateBus
 from src.CSCI_Simulation_Engine.CSC_Battery import BatteryModel
 from src.CSCI_Simulation_Engine.CSC_Configuration.CSU_SimConfig import SimConfig
@@ -48,6 +47,9 @@ class RealtimeTkViewer:
         self.simulation_port = simulation_port or NullSimulationPort()
         self.state_bus = StateBus()
         self.priority_evaluator = CandidatePriorityEvaluator()
+        self.confirmed_role_weights = self.priority_evaluator.get_role_priority_weights()
+        self.priority_locked = False
+        self.locked_priority_rows: list[tuple[str, str]] = []
         self.battery_model = BatteryModel()
         self.kill_event_model = RandomKillEventModel()
         self.recent_kill_events: list[KillEvent] = []
@@ -67,7 +69,7 @@ class RealtimeTkViewer:
         self.t_s = 0.0
         self.running = True
         self.scale_px_per_m = 6.2
-        self.tail_seconds = 9.0
+        self.tail_seconds = 2.0
         self.camera_x_m = 0.0
         self.camera_y_m = -25.0
         self.follow_camera = True
@@ -78,10 +80,23 @@ class RealtimeTkViewer:
         self.csv_file = None
         self.csv_writer: csv.writer | None = None
 
-        self.canvas_w = 920
-        self.canvas_h = 600
-        self.canvas = tk.Canvas(root, width=self.canvas_w, height=self.canvas_h, bg="#f8fafc", highlightthickness=0)
-        self.canvas.grid(row=0, column=0, columnspan=8, sticky="nsew")
+        self.expanded_canvas_height = 600
+        self.compact_canvas_height = 300
+        self.canvas_w = 460
+        self.canvas_h = self.expanded_canvas_height
+        self.top_view_frame = ttk.LabelFrame(root, text="2D TOP VIEW", padding=(2, 2))
+        self.top_view_frame.grid(row=1, column=0, columnspan=4, padx=(6, 3), pady=(0, 0), sticky="nsew")
+        self.top_view_frame.grid_rowconfigure(0, weight=1)
+        self.top_view_frame.grid_columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(
+            self.top_view_frame,
+            width=self.canvas_w,
+            height=self.canvas_h,
+            bg="#f8fafc",
+            highlightthickness=1,
+            highlightbackground="#94a3b8",
+        )
+        self.canvas.grid(row=0, column=0, sticky="nsew")
         self.canvas.bind("<Configure>", self.resize_canvas)
         self.canvas.bind("<ButtonPress-1>", self.start_drag)
         self.canvas.bind("<B1-Motion>", self.drag_camera)
@@ -90,11 +105,28 @@ class RealtimeTkViewer:
         self.canvas.bind("<Button-5>", self.zoom_out)
         self.root.bind("<KeyPress>", self.handle_key)
 
+        self.preview_canvas_w = 460
+        self.preview_canvas_h = self.expanded_canvas_height
+        self.preview_frame = ttk.LabelFrame(root, text="FORMATION PREVIEW", padding=(2, 2))
+        self.preview_frame.grid(row=1, column=4, columnspan=4, padx=(3, 6), pady=(0, 0), sticky="nsew")
+        self.preview_frame.grid_rowconfigure(0, weight=1)
+        self.preview_frame.grid_columnconfigure(0, weight=1)
+        self.preview_canvas = tk.Canvas(
+            self.preview_frame,
+            width=self.preview_canvas_w,
+            height=self.preview_canvas_h,
+            bg="#f8fafc",
+            highlightthickness=1,
+            highlightbackground="#94a3b8",
+        )
+        self.preview_canvas.grid(row=0, column=0, sticky="nsew")
+        self.preview_canvas.bind("<Configure>", self.resize_preview_canvas)
+
         self.sidebar_canvas = tk.Canvas(root, width=360, highlightthickness=0)
         self.sidebar_scrollbar = ttk.Scrollbar(root, orient="vertical", command=self.sidebar_canvas.yview)
         self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
-        self.sidebar_canvas.grid(row=0, column=8, rowspan=2, sticky="nsew")
-        self.sidebar_scrollbar.grid(row=0, column=9, rowspan=2, sticky="ns")
+        self.sidebar_canvas.grid(row=1, column=8, sticky="nsew")
+        self.sidebar_scrollbar.grid(row=1, column=9, sticky="ns")
 
         self.battery_frame = ttk.Frame(self.sidebar_canvas, padding=(12, 10))
         self.sidebar_window = self.sidebar_canvas.create_window((0, 0), window=self.battery_frame, anchor="nw")
@@ -135,37 +167,40 @@ class RealtimeTkViewer:
         self.priority_text.grid(row=0, column=0, sticky="ew")
         self.assignments: dict[str, AllocatedSlot] = {}
 
-        self.formation_panel = FormationPanel(self.battery_frame, on_shape_change=self.apply_formation_shape)
-        self.formation_panel.frame.grid(row=4, column=0, pady=(14, 0), sticky="new")
         self.build_role_weight_controls()
-        self.battery_frame.grid_rowconfigure(6, weight=1)
+        self.battery_frame.grid_rowconfigure(5, weight=1)
 
         self.start_button = ttk.Button(root, text="Pause", command=self.toggle_running)
-        self.start_button.grid(row=1, column=0, padx=6, pady=8, sticky="ew")
+        self.start_button.grid(row=0, column=0, padx=6, pady=8, sticky="ew")
 
         self.reset_button = ttk.Button(root, text="Reset", command=self.reset)
-        self.reset_button.grid(row=1, column=1, padx=6, pady=8, sticky="ew")
+        self.reset_button.grid(row=0, column=1, padx=6, pady=8, sticky="ew")
 
         self.follow_var = tk.BooleanVar(value=True)
         self.follow_check = ttk.Checkbutton(root, text="Follow", variable=self.follow_var, command=self.update_follow)
-        self.follow_check.grid(row=1, column=3, padx=6, pady=8, sticky="ew")
+        self.follow_check.grid(row=0, column=4, padx=6, pady=8, sticky="ew")
 
-        ttk.Label(root, text="UAV Speed").grid(row=1, column=4, padx=6, pady=8, sticky="e")
+        ttk.Label(root, text="UAV Speed").grid(row=0, column=5, padx=6, pady=8, sticky="e")
         self.speed_var = tk.DoubleVar(value=self.cfg.speed_mps)
         self.speed_scale = ttk.Scale(root, from_=5.0, to=35.0, variable=self.speed_var, command=self.update_speed)
-        self.speed_scale.grid(row=1, column=5, padx=6, pady=8, sticky="ew")
-
-        ttk.Label(root, text="Tail Length").grid(row=1, column=6, padx=6, pady=8, sticky="e")
-        self.tail_var = tk.DoubleVar(value=self.tail_seconds)
-        self.tail_scale = ttk.Scale(root, from_=2.0, to=20.0, variable=self.tail_var, command=self.update_tail)
-        self.tail_scale.grid(row=1, column=7, padx=6, pady=8, sticky="ew")
+        self.speed_scale.grid(row=0, column=6, columnspan=3, padx=6, pady=8, sticky="ew")
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(root, textvariable=self.status_var).grid(row=1, column=2, padx=10, pady=8, sticky="w")
+        ttk.Label(root, textvariable=self.status_var, width=34).grid(
+            row=0,
+            column=2,
+            columnspan=2,
+            padx=10,
+            pady=8,
+            sticky="w",
+        )
 
-        root.grid_columnconfigure(5, weight=1)
-        root.grid_columnconfigure(7, weight=1)
-        root.grid_rowconfigure(0, weight=1)
+        for column_idx in range(8):
+            root.grid_columnconfigure(column_idx, weight=1, uniform="simulation")
+        root.grid_rowconfigure(0, weight=0)
+        root.grid_rowconfigure(1, weight=1)
+        root.grid_rowconfigure(2, weight=0)
+        self.build_formation_shape_selector(root)
         self.initialize_battery_table()
         self.start_output_session()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -178,20 +213,91 @@ class RealtimeTkViewer:
     def resize_sidebar_frame(self, event: tk.Event) -> None:
         self.sidebar_canvas.itemconfigure(self.sidebar_window, width=event.width)
 
+    def build_formation_shape_selector(self, parent: tk.Widget) -> None:
+        self.shape_selector_visible = False
+        self.shape_selector_frame = ttk.Frame(parent, padding=(12, 12))
+        for column_idx in range(4):
+            self.shape_selector_frame.grid_columnconfigure(column_idx, weight=1, uniform="shape")
+        self.shape_selector_frame.grid_rowconfigure(0, weight=1)
+
+        shapes = [
+            ("wedge", "Wedge"),
+            ("line", "Line"),
+            ("column", "Column"),
+            ("staggered_column", "Staggered Column"),
+        ]
+        for col_idx, (shape_type, label) in enumerate(shapes):
+            button = tk.Button(
+                self.shape_selector_frame,
+                text=label,
+                height=10,
+                font=("Arial", 12, "bold"),
+                relief="solid",
+                bd=1,
+                bg="#f8fafc",
+                fg="#0f172a",
+                activebackground="#e2e8f0",
+                command=lambda selected_shape=shape_type: self.select_formation_shape(selected_shape),
+            )
+            button.grid(row=0, column=col_idx, padx=8, pady=6, sticky="nsew")
+
+        self.shape_selector_frame.grid(row=2, column=0, columnspan=8, sticky="nsew")
+        self.shape_selector_frame.grid_remove()
+
+    def show_formation_shape_selector(self) -> None:
+        if self.shape_selector_visible:
+            return
+
+        self.shape_selector_visible = True
+        self.canvas.configure(height=self.compact_canvas_height)
+        self.preview_canvas.configure(height=self.compact_canvas_height)
+        self.shape_selector_frame.grid()
+
+    def hide_formation_shape_selector(self) -> None:
+        if not self.shape_selector_visible:
+            return
+
+        self.shape_selector_visible = False
+        self.shape_selector_frame.grid_remove()
+        self.canvas.configure(height=self.expanded_canvas_height)
+        self.preview_canvas.configure(height=self.expanded_canvas_height)
+
+    def select_formation_shape(self, shape_type: str) -> None:
+        for uav in self.uavs:
+            if not self.is_killed_uav(uav):
+                uav.formation_id = 1
+        self.failure_reconfiguration_applied = True
+        self.apply_formation_shape(shape_type)
+        self.hide_formation_shape_selector()
+
     def build_role_weight_controls(self) -> None:
         self.role_weight_frame = ttk.Frame(self.battery_frame)
-        self.role_weight_frame.grid(row=5, column=0, pady=(14, 0), sticky="new")
+        self.role_weight_frame.grid(row=4, column=0, pady=(14, 0), sticky="new")
         self.role_weight_frame.grid_columnconfigure(1, weight=1)
 
         ttk.Label(self.role_weight_frame, text="Role Weight", font=("Arial", 12, "bold")).grid(
             row=0,
             column=0,
-            columnspan=3,
             sticky="w",
         )
+        role_weight_button_frame = ttk.Frame(self.role_weight_frame)
+        role_weight_button_frame.grid(row=0, column=1, columnspan=2, sticky="e")
+        self.confirm_role_weight_button = ttk.Button(
+            role_weight_button_frame,
+            text="확인",
+            command=self.confirm_role_weights,
+        )
+        self.confirm_role_weight_button.grid(row=0, column=0, padx=(0, 4), sticky="e")
+        self.reset_role_weight_button = ttk.Button(
+            role_weight_button_frame,
+            text="초기화",
+            command=self.reset_role_weights,
+        )
+        self.reset_role_weight_button.grid(row=0, column=1, sticky="e")
 
         self.role_weight_vars: dict[str, tk.DoubleVar] = {}
         self.role_weight_value_labels: dict[str, ttk.Label] = {}
+        self.role_weight_scales: dict[str, ttk.Scale] = {}
         current_weights = self.priority_evaluator.get_role_priority_weights()
         for row_idx, role in enumerate(ROLE_PRIORITY_WEIGHT, start=1):
             value = current_weights.get(role, ROLE_PRIORITY_WEIGHT[role])
@@ -231,6 +337,7 @@ class RealtimeTkViewer:
                 ),
             )
             scale.grid(row=row_idx, column=1, pady=3, sticky="ew")
+            self.role_weight_scales[role] = scale
 
             value_label = ttk.Label(self.role_weight_frame, text=f"{value:.1f}", width=4, anchor="e")
             value_label.grid(row=row_idx, column=2, padx=(8, 0), pady=3, sticky="e")
@@ -253,16 +360,46 @@ class RealtimeTkViewer:
         self.role_weight_value_labels[role].configure(text=f"{stepped_value:.1f}")
         self.priority_evaluator.set_role_priority_weight(role, stepped_value)
 
+    def confirm_role_weights(self) -> None:
+        self.confirmed_role_weights = self.priority_evaluator.get_role_priority_weights()
+        self.locked_priority_rows = self.build_priority_rows()
+        self.priority_locked = True
+        self.set_priority_text(self.locked_priority_rows)
+        self.set_role_weight_controls_enabled(False)
+        self.show_formation_shape_selector()
+
+    def reset_role_weights(self) -> None:
+        self.hide_formation_shape_selector()
+        self.priority_locked = False
+        self.locked_priority_rows = []
+        self.set_role_weight_controls_enabled(True)
+
+        for role, default_weight in ROLE_PRIORITY_WEIGHT.items():
+            self.update_role_weight(role, str(default_weight))
+        self.confirmed_role_weights = self.priority_evaluator.get_role_priority_weights()
+        self.update_priority_panel()
+
+    def set_role_weight_controls_enabled(self, enabled: bool) -> None:
+        for scale in self.role_weight_scales.values():
+            if enabled:
+                scale.state(["!disabled"])
+            else:
+                scale.state(["disabled"])
+        self.confirm_role_weight_button.configure(state="normal" if enabled else "disabled")
+
     def apply_formation_shape(self, shape_type: str | None = None) -> None:
-        if shape_type is None:
-            shape_type = self.formation_panel.get_current_shape()
         if not shape_type:
             self.assignments = {}
             return
 
         # 통합 매니저를 통해 알고리즘 수행
         active_uavs = [uav for uav in self.uavs if not self.is_killed_uav(uav)]
-        self.assignments = update_formation_assignments(active_uavs, shape_type, spacing_m=10.0)
+        self.assignments = update_formation_assignments(
+            active_uavs,
+            shape_type,
+            spacing_m=10.0,
+            role_weights=self.confirmed_role_weights,
+        )
 
         for uid, alloc in self.assignments.items():
             # 시뮬레이터에서 기체 순간이동 반영
@@ -282,7 +419,10 @@ class RealtimeTkViewer:
         self.follow_camera = self.follow_var.get()
         self.assignments = {}
         self.failure_reconfiguration_applied = False
-        self.formation_panel.clear_selection()
+        self.hide_formation_shape_selector()
+        self.priority_locked = False
+        self.locked_priority_rows = []
+        self.set_role_weight_controls_enabled(True)
         self.initialize_battery_table()
         self.start_output_session()
 
@@ -294,9 +434,6 @@ class RealtimeTkViewer:
         speed = self.speed_var.get()
         for uav in self.uavs:
             uav.speed_mps = speed
-
-    def update_tail(self, _: str) -> None:
-        self.tail_seconds = self.tail_var.get()
 
     def update_follow(self) -> None:
         self.follow_camera = self.follow_var.get()
@@ -433,16 +570,6 @@ class RealtimeTkViewer:
             uav.battery_pct = battery_state.battery_pct
 
         self.recent_kill_events = self.kill_event_model.apply_due_events(self.t_s, self.uavs)
-        if (
-            not self.failure_reconfiguration_applied
-            and len(self.kill_event_model.kill_events) >= self.kill_event_model.config.total_kills
-        ):
-            for uav in self.uavs:
-                if not self.is_killed_uav(uav):
-                    uav.formation_id = 1
-            self.failure_reconfiguration_applied = True
-            self.formation_panel.set_selection("line")
-            self.apply_formation_shape("line")
         snapshot = build_snapshot(self.t_s, self.uavs)
         self.state_bus.update_from_simulation_snapshot(snapshot)
         self.simulation_port.publish(snapshot)
@@ -533,6 +660,10 @@ class RealtimeTkViewer:
         self.canvas_w = max(event.width, 1)
         self.canvas_h = max(event.height, 1)
 
+    def resize_preview_canvas(self, event: tk.Event) -> None:
+        self.preview_canvas_w = max(event.width, 1)
+        self.preview_canvas_h = max(event.height, 1)
+
     def world_to_screen(self, x_m: float, y_m: float) -> tuple[float, float]:
         cx = self.canvas_w * 0.48
         cy = self.canvas_h * 0.52
@@ -555,7 +686,9 @@ class RealtimeTkViewer:
     def draw(self) -> None:
         self.update_camera()
         self.canvas.delete("all")
+        self.preview_canvas.delete("all")
         self.draw_grid()
+        self.draw_preview_grid()
         self.draw_slots()
         self.draw_uavs()
         self.draw_hud()
@@ -622,10 +755,16 @@ class RealtimeTkViewer:
                 status_label.configure(text="OK", bg="#e2e8f0", fg="#0f172a")
 
     def update_priority_panel(self) -> None:
+        if self.priority_locked:
+            self.set_priority_text(self.locked_priority_rows)
+            return
+
+        self.set_priority_text(self.build_priority_rows())
+
+    def build_priority_rows(self) -> list[tuple[str, str]]:
         candidates = self.priority_evaluator.rank_candidates(self.state_bus.operational_states(self.t_s))
         if not candidates:
-            self.set_priority_text([("Waiting for telemetry", "muted")])
-            return
+            return [("Waiting for telemetry", "muted")]
 
         rows: list[tuple[str, str]] = [("AVAILABLE CANDIDATES", "section"), ("Rank UAV    Role   Score  Batt", "muted")]
         for rank, candidate in enumerate(candidates, start=1):
@@ -644,7 +783,7 @@ class RealtimeTkViewer:
             for uav in killed_uavs:
                 rows.append((f"XX  {uav.uid:<6} {uav.role:<6} KILLED", "killed"))
 
-        self.set_priority_text(rows)
+        return rows
 
     def set_priority_text(self, rows: list[tuple[str, str]]) -> None:
         self.priority_text.configure(state="normal")
@@ -681,6 +820,43 @@ class RealtimeTkViewer:
             color = "#cbd5e1" if abs(y) < 1e-6 else "#e2e8f0"
             self.canvas.create_line(0, sy, self.canvas_w, sy, fill=color)
             self.canvas.create_text(8, sy - 3, text=f"{y:.0f}", fill="#64748b", anchor="w", font=("Arial", 9))
+            y += grid_m
+
+    def preview_world_to_screen(self, x_m: float, y_m: float) -> tuple[float, float]:
+        cx = self.preview_canvas_w * 0.48
+        cy = self.preview_canvas_h * 0.52
+        sx = cx + (x_m - self.camera_x_m) * self.scale_px_per_m
+        sy = cy - (y_m - self.camera_y_m) * self.scale_px_per_m
+        return sx, sy
+
+    def draw_preview_grid(self) -> None:
+        grid_m = 10.0
+        left_m = self.camera_x_m - self.preview_canvas_w / self.scale_px_per_m / 2.0
+        right_m = self.camera_x_m + self.preview_canvas_w / self.scale_px_per_m / 2.0
+        bottom_m = self.camera_y_m - self.preview_canvas_h / self.scale_px_per_m / 2.0
+        top_m = self.camera_y_m + self.preview_canvas_h / self.scale_px_per_m / 2.0
+
+        x = math.floor(left_m / grid_m) * grid_m
+        while x <= right_m:
+            sx, _ = self.preview_world_to_screen(x, 0.0)
+            color = "#cbd5e1" if abs(x) < 1e-6 else "#e2e8f0"
+            self.preview_canvas.create_line(sx, 0, sx, self.preview_canvas_h, fill=color)
+            self.preview_canvas.create_text(
+                sx + 3,
+                self.preview_canvas_h - 18,
+                text=f"{x:.0f}",
+                fill="#64748b",
+                anchor="w",
+                font=("Arial", 9),
+            )
+            x += grid_m
+
+        y = math.floor(bottom_m / grid_m) * grid_m
+        while y <= top_m:
+            _, sy = self.preview_world_to_screen(0.0, y)
+            color = "#cbd5e1" if abs(y) < 1e-6 else "#e2e8f0"
+            self.preview_canvas.create_line(0, sy, self.preview_canvas_w, sy, fill=color)
+            self.preview_canvas.create_text(8, sy - 3, text=f"{y:.0f}", fill="#64748b", anchor="w", font=("Arial", 9))
             y += grid_m
 
     def draw_slots(self) -> None:
@@ -756,7 +932,7 @@ class RealtimeTkViewer:
 
     def draw_hud(self) -> None:
         self.status_var.set(
-            f"t = {self.t_s:5.1f} sec    speed = {self.speed_var.get():4.1f} m/s    tail = {self.tail_seconds:4.1f} sec"
+            f"t = {self.t_s:5.1f} sec    speed = {self.speed_var.get():4.1f} m/s"
         )
 
 
