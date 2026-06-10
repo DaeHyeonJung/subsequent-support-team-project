@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import math
 import tkinter as tk
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
@@ -13,6 +14,9 @@ from src.CSCI_Reconfiguration_Decision.CSC_FormationManagement.CSU_FormationMana
     update_formation_assignments,
     calculate_formation_render_data,
     AllocatedSlot,
+)
+from src.CSCI_Reconfiguration_Decision.CSC_FormationManagement.CSU_ReconfigurationEvaluator import (
+    evaluate_reconfiguration_plan,
 )
 from src.CSCI_Simulation_Engine.CSC_Visualization.CSU_FormationRenderer import render_formation_to_canvas
 from src.CSCI_Reconfiguration_Decision.CSC_StateBus.CSU_StateBus import StateBus
@@ -81,7 +85,7 @@ class RealtimeTkViewer:
         self.csv_writer: csv.writer | None = None
 
         self.expanded_canvas_height = 600
-        self.compact_canvas_height = 300
+        self.compact_canvas_height = 240
         self.canvas_w = 460
         self.canvas_h = self.expanded_canvas_height
         self.top_view_frame = ttk.LabelFrame(root, text="2D TOP VIEW", padding=(2, 2))
@@ -125,8 +129,8 @@ class RealtimeTkViewer:
         self.sidebar_canvas = tk.Canvas(root, width=360, highlightthickness=0)
         self.sidebar_scrollbar = ttk.Scrollbar(root, orient="vertical", command=self.sidebar_canvas.yview)
         self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scrollbar.set)
-        self.sidebar_canvas.grid(row=1, column=8, sticky="nsew")
-        self.sidebar_scrollbar.grid(row=1, column=9, sticky="ns")
+        self.sidebar_canvas.grid(row=1, column=8, rowspan=2, sticky="nsew")
+        self.sidebar_scrollbar.grid(row=1, column=9, rowspan=2, sticky="ns")
 
         self.battery_frame = ttk.Frame(self.sidebar_canvas, padding=(12, 10))
         self.sidebar_window = self.sidebar_canvas.create_window((0, 0), window=self.battery_frame, anchor="nw")
@@ -215,7 +219,8 @@ class RealtimeTkViewer:
 
     def build_formation_shape_selector(self, parent: tk.Widget) -> None:
         self.shape_selector_visible = False
-        self.shape_selector_frame = ttk.Frame(parent, padding=(12, 12))
+        self.shape_selector_frame = ttk.Frame(parent, padding=(6, 6))
+        self.shape_preview_canvases: dict[str, tk.Canvas] = {}
         for column_idx in range(4):
             self.shape_selector_frame.grid_columnconfigure(column_idx, weight=1, uniform="shape")
         self.shape_selector_frame.grid_rowconfigure(0, weight=1)
@@ -227,22 +232,153 @@ class RealtimeTkViewer:
             ("staggered_column", "Staggered Column"),
         ]
         for col_idx, (shape_type, label) in enumerate(shapes):
-            button = tk.Button(
+            canvas = tk.Canvas(
                 self.shape_selector_frame,
-                text=label,
-                height=10,
-                font=("Arial", 12, "bold"),
-                relief="solid",
-                bd=1,
+                height=280,
                 bg="#f8fafc",
-                fg="#0f172a",
-                activebackground="#e2e8f0",
-                command=lambda selected_shape=shape_type: self.select_formation_shape(selected_shape),
+                highlightthickness=1,
+                highlightbackground="#94a3b8",
+                cursor="hand2",
             )
-            button.grid(row=0, column=col_idx, padx=8, pady=6, sticky="nsew")
+            canvas.grid(row=0, column=col_idx, padx=4, pady=2, sticky="nsew")
+            canvas.bind("<Button-1>", lambda _event, selected_shape=shape_type: self.select_formation_shape(selected_shape))
+            canvas.bind("<Configure>", lambda _event, selected_shape=shape_type: self.draw_formation_shape_preview(selected_shape))
+            self.shape_preview_canvases[shape_type] = canvas
 
         self.shape_selector_frame.grid(row=2, column=0, columnspan=8, sticky="nsew")
         self.shape_selector_frame.grid_remove()
+
+    def refresh_formation_shape_previews(self) -> None:
+        for shape_type in self.shape_preview_canvases:
+            self.draw_formation_shape_preview(shape_type)
+
+    def draw_formation_shape_preview(self, shape_type: str) -> None:
+        canvas = self.shape_preview_canvases.get(shape_type)
+        if canvas is None:
+            return
+
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 1)
+        height = max(canvas.winfo_height(), 1)
+        canvas.create_rectangle(0, 0, width, height, fill="#f8fafc", outline="#94a3b8")
+
+        label = {
+            "wedge": "Wedge",
+            "line": "Line",
+            "column": "Column",
+            "staggered_column": "Staggered Column",
+        }.get(shape_type, shape_type)
+        canvas.create_text(width / 2, 15, text=label, fill="#0f172a", font=("Arial", 10, "bold"))
+
+        active_uavs = [
+            replace(uav, formation_id=1)
+            for uav in self.uavs
+            if not self.is_killed_uav(uav)
+        ]
+        if not active_uavs:
+            return
+
+        assignments = update_formation_assignments(
+            active_uavs,
+            shape_type,
+            spacing_m=10.0,
+            role_weights=self.confirmed_role_weights,
+        )
+        preview_guidance = WaypointGuidance(
+            max_speed=self.speed_var.get() * 0.8,
+            avoidance_radius=self.guidance.avoidance_radius,
+            repulsive_gain=self.guidance.repulsive_gain,
+        )
+        evaluation = evaluate_reconfiguration_plan(
+            active_uavs,
+            assignments,
+            self.battery_model,
+            preview_guidance.compute_velocity_command,
+            base_speed_mps=self.speed_var.get(),
+            dt_s=self.cfg.dt,
+        )
+        ordered_allocs = sorted(assignments.values(), key=lambda alloc: alloc.slot_index)
+        if not ordered_allocs:
+            return
+
+        role_by_uid = {uav.uid: uav.role for uav in active_uavs}
+        min_x = min(alloc.target_x for alloc in ordered_allocs)
+        max_x = max(alloc.target_x for alloc in ordered_allocs)
+        min_y = min(alloc.target_y for alloc in ordered_allocs)
+        max_y = max(alloc.target_y for alloc in ordered_allocs)
+
+        plot_left = 18.0
+        plot_right = width - 18.0
+        plot_top = 34.0
+        metrics_top = height - 45.0
+        plot_bottom = metrics_top - 8.0
+        plot_w = max(plot_right - plot_left, 1.0)
+        plot_h = max(plot_bottom - plot_top, 1.0)
+        span_x = max(max_x - min_x, 1.0)
+        span_y = max(max_y - min_y, 1.0)
+        scale = min(plot_w / span_x, plot_h / span_y) * 0.82
+        center_x = (min_x + max_x) / 2.0
+        center_y = (min_y + max_y) / 2.0
+        screen_cx = (plot_left + plot_right) / 2.0
+        screen_cy = (plot_top + plot_bottom) / 2.0
+
+        points: list[tuple[float, float, AllocatedSlot]] = []
+        for alloc in ordered_allocs:
+            sx = screen_cx + (alloc.target_x - center_x) * scale
+            sy = screen_cy - (alloc.target_y - center_y) * scale
+            points.append((sx, sy, alloc))
+
+        if shape_type == "wedge":
+            self.draw_wedge_preview_lines(canvas, points)
+        else:
+            for idx in range(1, len(points)):
+                x1, y1, _ = points[idx - 1]
+                x2, y2, _ = points[idx]
+                canvas.create_line(x1, y1, x2, y2, fill="#cbd5e1", width=2)
+
+        radius = 8
+        for sx, sy, alloc in points:
+            role = role_by_uid.get(alloc.uid, "")
+            fill = role_color(role)
+            canvas.create_oval(sx - radius, sy - radius, sx + radius, sy + radius, fill=fill, outline="#ffffff", width=2)
+            canvas.create_text(sx, sy, text=str(alloc.slot_index), fill="#ffffff", font=("Arial", 8, "bold"))
+
+        canvas.create_text(
+            12,
+            height - 32,
+            text=f"배터리 평균 소모량 : {evaluation.average_battery_drain_pct:.2f}%",
+            fill="#475569",
+            anchor="w",
+            font=("Arial", 12),
+        )
+        transition_text = f"{evaluation.transition_time_s:.1f}s"
+        if not evaluation.converged:
+            transition_text = f">{evaluation.transition_time_s:.0f}s"
+        canvas.create_text(
+            12,
+            height - 14,
+            text=f"편대 재편성 전환 소요 시간: {transition_text}",
+            fill="#475569",
+            anchor="w",
+            font=("Arial", 12),
+        )
+
+    def draw_wedge_preview_lines(
+        self,
+        canvas: tk.Canvas,
+        points: list[tuple[float, float, AllocatedSlot]],
+    ) -> None:
+        points_by_slot = {alloc.slot_index: (sx, sy) for sx, sy, alloc in points}
+        if 1 not in points_by_slot:
+            return
+
+        left_branch = [1] + sorted(slot for slot in points_by_slot if slot > 1 and slot % 2 == 0)
+        right_branch = [1] + sorted(slot for slot in points_by_slot if slot > 1 and slot % 2 == 1)
+        for branch in (left_branch, right_branch):
+            for start_slot, end_slot in zip(branch, branch[1:]):
+                x1, y1 = points_by_slot[start_slot]
+                x2, y2 = points_by_slot[end_slot]
+                canvas.create_line(x1, y1, x2, y2, fill="#cbd5e1", width=2)
 
     def show_formation_shape_selector(self) -> None:
         if self.shape_selector_visible:
@@ -252,6 +388,8 @@ class RealtimeTkViewer:
         self.canvas.configure(height=self.compact_canvas_height)
         self.preview_canvas.configure(height=self.compact_canvas_height)
         self.shape_selector_frame.grid()
+        self.root.update_idletasks()
+        self.refresh_formation_shape_previews()
 
     def hide_formation_shape_selector(self) -> None:
         if not self.shape_selector_visible:
