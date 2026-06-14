@@ -170,6 +170,7 @@ class RealtimeTkViewer:
         self.priority_text.configure(state="disabled")
         self.priority_text.grid(row=0, column=0, sticky="ew")
         self.assignments: dict[str, AllocatedSlot] = {}
+        self.current_shape_type: str | None = None
 
         self.build_role_weight_controls()
         self.battery_frame.grid_rowconfigure(5, weight=1)
@@ -283,6 +284,7 @@ class RealtimeTkViewer:
             shape_type,
             spacing_m=10.0,
             role_weights=self.confirmed_role_weights,
+            current_speed=self.speed_var.get(),
         )
         preview_guidance = WaypointGuidance(
             max_speed=self.speed_var.get() * 0.8,
@@ -526,6 +528,11 @@ class RealtimeTkViewer:
         self.confirm_role_weight_button.configure(state="normal" if enabled else "disabled")
 
     def apply_formation_shape(self, shape_type: str | None = None) -> None:
+        if shape_type:
+            self.current_shape_type = shape_type
+        else:
+            shape_type = self.current_shape_type
+
         if not shape_type:
             self.assignments = {}
             return
@@ -537,6 +544,7 @@ class RealtimeTkViewer:
             shape_type,
             spacing_m=10.0,
             role_weights=self.confirmed_role_weights,
+            current_speed=self.speed_var.get(),
         )
 
         for uid, alloc in self.assignments.items():
@@ -544,6 +552,35 @@ class RealtimeTkViewer:
             uav = next((u for u in self.uavs if u.uid == uid), None)
             if uav:
                 pass  # 순간이동(Teleport)을 제거하고 advance_simulation에서 Guidance로 이동 처리
+
+    def update_assignment_reference_for_speed(self, speed: float) -> None:
+        if not self.assignments:
+            return
+
+        assignments_by_form: dict[int, list[AllocatedSlot]] = {}
+        for alloc in self.assignments.values():
+            assignments_by_form.setdefault(alloc.form_id, []).append(alloc)
+
+        updated_assignments: dict[str, AllocatedSlot] = {}
+        for allocs in assignments_by_form.values():
+            center_x = sum(alloc.target_x for alloc in allocs) / len(allocs)
+
+            if speed >= 30.0:
+                slot_1 = next((alloc for alloc in allocs if alloc.slot_index == 1), allocs[0])
+                center_y = slot_1.target_y
+            elif speed <= 10.0:
+                center_y = min(alloc.target_y for alloc in allocs)
+            else:
+                center_y = sum(alloc.target_y for alloc in allocs) / len(allocs)
+
+            for alloc in allocs:
+                updated_assignments[alloc.uid] = replace(
+                    alloc,
+                    dx=alloc.target_x - center_x,
+                    dy=alloc.target_y - center_y,
+                )
+
+        self.assignments = updated_assignments
 
     def reset(self) -> None:
         self.finish_output_session()
@@ -556,6 +593,7 @@ class RealtimeTkViewer:
         self.camera_y_m = -25.0
         self.follow_camera = self.follow_var.get()
         self.assignments = {}
+        self.current_shape_type = None
         self.failure_reconfiguration_applied = False
         self.hide_formation_shape_selector()
         self.priority_locked = False
@@ -572,6 +610,7 @@ class RealtimeTkViewer:
         speed = self.speed_var.get()
         for uav in self.uavs:
             uav.speed_mps = speed
+        self.update_assignment_reference_for_speed(speed)
 
     def update_follow(self) -> None:
         self.follow_camera = self.follow_var.get()
@@ -642,21 +681,6 @@ class RealtimeTkViewer:
         # 기체들이 멈칫하지 않고 부드럽게 대형을 맞추도록 상대 속도의 최대치를 제한합니다.
         self.guidance.max_speed = current_formation_speed * 0.8
 
-        # 편대 전체가 직진 비행(위쪽 방향, Y축)을 유지할 수 있도록 목표 슬롯(target)을 전방으로 이동시킵니다.
-        if self.assignments:
-            updated_assignments = {}
-            for uid, alloc in self.assignments.items():
-                updated_assignments[uid] = AllocatedSlot(
-                    uid=alloc.uid,
-                    form_id=alloc.form_id,
-                    slot_index=alloc.slot_index,
-                    target_x=alloc.target_x,
-                    target_y=alloc.target_y + current_formation_speed * self.cfg.dt,
-                    dx=alloc.dx,
-                    dy=alloc.dy
-                )
-            self.assignments = updated_assignments
-
         # 1. 모든 기체의 다음 속도(명령)를 먼저 계산 (동기적 업데이트)
         vel_commands = []
         for uav in self.uavs:
@@ -682,7 +706,22 @@ class RealtimeTkViewer:
         if not self.assignments:
             vel_commands = [base_vel for _ in self.uavs]
 
-        # 2. 계산된 속도를 바탕으로 실제 기체의 위치와 기수(Heading) 업데이트
+        # 2. 타겟(슬롯)을 전방으로 이동 (계산 오차 방지를 위해 기체 속도 계산 후 이동시킵니다)
+        if self.assignments:
+            updated_assignments = {}
+            for uid, alloc in self.assignments.items():
+                updated_assignments[uid] = AllocatedSlot(
+                    uid=alloc.uid,
+                    form_id=alloc.form_id,
+                    slot_index=alloc.slot_index,
+                    target_x=alloc.target_x,
+                    target_y=alloc.target_y + current_formation_speed * self.cfg.dt,
+                    dx=alloc.dx,
+                    dy=alloc.dy
+                )
+            self.assignments = updated_assignments
+
+        # 3. 계산된 속도를 바탕으로 실제 기체의 위치와 기수(Heading) 업데이트
         for i, uav in enumerate(self.uavs):
             uav.record(self.t_s)
             if self.is_killed_uav(uav):
