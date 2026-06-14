@@ -73,9 +73,6 @@ def evaluate_reconfiguration_plan(
             converged = True
             break
 
-        for target in targets.values():
-            target[1] += base_speed_mps * dt_s
-
         positions = {
             uav.uid: np.array([uav.x_m, uav.y_m], dtype=float)
             for uav in preview_uavs
@@ -102,6 +99,9 @@ def evaluate_reconfiguration_plan(
             )
             uav.discharge_progress = battery_state.discharge_progress
             uav.battery_pct = battery_state.battery_pct
+
+        for target in targets.values():
+            target[1] += base_speed_mps * dt_s
 
         elapsed_s += dt_s
 
