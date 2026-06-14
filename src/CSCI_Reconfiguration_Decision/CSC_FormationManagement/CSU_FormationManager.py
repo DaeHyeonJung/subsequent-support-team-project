@@ -45,7 +45,8 @@ def update_formation_assignments(
     uavs: List[UavState], 
     shape_type: str, 
     spacing_m: float = 10.0,
-    role_weights: Dict[str, float] | None = None
+    role_weights: Dict[str, float] | None = None,
+    current_speed: float = 15.0
 ) -> Dict[str, AllocatedSlot]:
     """
     UAV 상태와 원하는 편대 형상을 받아, 각 기체의 절대 목적지와 슬롯 정보를 매핑해 반환합니다.
@@ -61,13 +62,30 @@ def update_formation_assignments(
         if not uav_list:
             continue
             
-        center_x = sum(u.x_m for u in uav_list) / len(uav_list)
-        center_y = sum(u.y_m for u in uav_list) / len(uav_list)
-            
         slots = get_formation_slots(shape_type, len(uav_list), spacing_m)
         
+        center_x = sum(u.x_m for u in uav_list) / len(uav_list)
         mean_dx = sum(s.dx_m for s in slots) / len(slots)
-        mean_dy = sum(s.dy_m for s in slots) / len(slots)
+
+        if current_speed >= 30.0:
+            if role_weights is not None:
+                ref_uav = sorted(
+                    uav_list,
+                    key=lambda u: (role_weights.get(u.role, 0.0), u.battery_pct),
+                    reverse=True,
+                )[0]
+            else:
+                ref_uav = sorted(uav_list, key=lambda u: u.battery_pct, reverse=True)[0]
+            center_y = ref_uav.y_m
+            slot_1 = next((s for s in slots if s.slot_index == 1), slots[0])
+            mean_dy = slot_1.dy_m
+        elif current_speed <= 10.0:
+            ref_uav = min(uav_list, key=lambda u: u.y_m)
+            center_y = ref_uav.y_m
+            mean_dy = min(s.dy_m for s in slots)
+        else:
+            center_y = sum(u.y_m for u in uav_list) / len(uav_list)
+            mean_dy = sum(s.dy_m for s in slots) / len(slots)
         
         if role_weights is not None:
             allocation_map = allocate_slots_by_role(
@@ -102,16 +120,6 @@ def calculate_formation_render_data(uavs: List[UavState], assignments: Dict[str,
     UI와 알고리즘을 분리하기 위한 시각화 데이터 생성 함수입니다.
     """
     centers: dict[int, tuple[float, float]] = {}
-    formations: dict[int, list[UavState]] = {}
-    for uav in uavs:
-        formations.setdefault(uav.formation_id, []).append(uav)
-        
-    for form_id, uav_list in formations.items():
-        if not uav_list:
-            continue
-        cx = sum(u.x_m for u in uav_list) / len(uav_list)
-        cy = sum(u.y_m for u in uav_list) / len(uav_list)
-        centers[form_id] = (cx, cy)
         
     form_slots_world: dict[int, list[tuple[float, float, int]]] = {}
     slots_out = []

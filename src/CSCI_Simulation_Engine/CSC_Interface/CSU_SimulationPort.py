@@ -13,9 +13,15 @@ class UavSnapshot:
     role: str
     x_m: float
     y_m: float
+    z_m: float
     heading_rad: float
+    flight_path_rad: float
     speed_mps: float
+    longitudinal_accel_mps2: float
+    vertical_accel_mps2: float
     roll_rad: float
+    roll_rate_rad_s: float
+    flight_path_rate_rad_s: float
     battery_pct: float
     battery_discharge_progress: float
     cell_voltage_v: float
@@ -51,9 +57,15 @@ def build_snapshot(time_s: float, uavs: list[UavState]) -> SimulationSnapshot:
                 role=uav.role,
                 x_m=uav.x_m,
                 y_m=uav.y_m,
+                z_m=uav.z_m,
                 heading_rad=uav.heading_rad,
+                flight_path_rad=uav.flight_path_rad,
                 speed_mps=uav.speed_mps,
+                longitudinal_accel_mps2=uav.longitudinal_accel_mps2,
+                vertical_accel_mps2=uav.vertical_accel_mps2,
                 roll_rad=uav.roll_rad,
+                roll_rate_rad_s=uav.roll_rate_rad_s,
+                flight_path_rate_rad_s=uav.flight_path_rate_rad_s,
                 battery_pct=uav.battery_pct,
                 battery_discharge_progress=uav.battery_discharge_progress,
                 cell_voltage_v=uav.cell_voltage_v,
