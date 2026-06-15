@@ -167,7 +167,7 @@ def evaluate_reconfiguration_plan_3d(
         for uav in preview_uavs:
             alloc = preview_assignments[uav.uid]
             avoidance_vector = collision_avoidance.compute_avoidance_vector(uav, preview_uavs)
-            desired_heading_rad, desired_flight_path_rad, speed_cmd_mps = tracking_command(
+            roll_cmd_rad, desired_flight_path_rad, speed_cmd_mps = tracking_command(
                 uav,
                 alloc.target_x,
                 alloc.target_y,
@@ -176,11 +176,6 @@ def evaluate_reconfiguration_plan_3d(
                 avoidance_vector.x_m,
                 avoidance_vector.y_m,
                 avoidance_vector.z_m,
-            )
-            roll_cmd_rad = heading_controller.compute_roll_command(
-                current_heading_rad=uav.heading_rad,
-                desired_heading_rad=desired_heading_rad,
-                speed_mps=uav.speed_mps,
             )
             step_uav(
                 uav,

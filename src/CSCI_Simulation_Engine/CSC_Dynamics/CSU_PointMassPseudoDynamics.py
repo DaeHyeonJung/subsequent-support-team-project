@@ -8,9 +8,6 @@ from src.CSCI_Simulation_Engine.CSC_Configuration.CSU_SimConfig import SimConfig
 from src.CSCI_Simulation_Engine.CSC_Models.CSU_UavState import UavState
 
 
-G = 9.80665
-
-
 def clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(value, upper))
 
@@ -84,14 +81,15 @@ def step_uav(
     if abs(uav.roll_rad) >= max_roll_rad and uav.roll_rad * uav.roll_rate_rad_s > 0.0:
         uav.roll_rate_rad_s = 0.0
 
-    yaw_rate_rad_s = G / max(uav.speed_mps * max(math.cos(uav.flight_path_rad), 0.2), 1.0) * math.tan(uav.roll_rad)
+    gravity_mps2 = cfg.gravity_mps2
+    yaw_rate_rad_s = gravity_mps2 / max(uav.speed_mps * max(math.cos(uav.flight_path_rad), 0.2), 1.0) * math.tan(uav.roll_rad)
     uav.heading_rad += yaw_rate_rad_s * cfg.dt
 
     dynamic_pressure_pa = 0.5 * cfg.air_density_kg_m3 * uav.speed_mps * uav.speed_mps
     lift_n = dynamic_pressure_pa * cfg.wing_area_m2 * cfg.lift_coefficient
     drag_n = dynamic_pressure_pa * cfg.wing_area_m2 * cfg.drag_coefficient
     thrust_n = cfg.thrust_coefficient * cfg.air_density_kg_m3 * cfg.wing_area_m2 * uav.speed_mps * uav.speed_mps
-    force_vertical_n = lift_n * math.cos(uav.roll_rad) - cfg.aircraft_mass_kg * G * math.cos(uav.flight_path_rad)
+    force_vertical_n = lift_n * math.cos(uav.roll_rad) - cfg.aircraft_mass_kg * gravity_mps2 * math.cos(uav.flight_path_rad)
     uav.vertical_accel_mps2 = force_vertical_n / max(cfg.aircraft_mass_kg, 1e-6)
     _ = drag_n
     _ = thrust_n
