@@ -85,18 +85,18 @@ def evaluate_reconfiguration_plan(
             uav.uid: np.array([uav.x_m, uav.y_m], dtype=float)
             for uav in preview_uavs
         }
-        velocities: dict[str, np.ndarray] = {}
-        for uav in preview_uavs:
-            current_pos = positions[uav.uid]
-            target_pos = targets[uav.uid]
-            neighbors = [pos for uid, pos in positions.items() if uid != uav.uid]
-            rel_vel = velocity_command(current_pos, target_pos, neighbors)
-            velocities[uav.uid] = base_vel + rel_vel
+        next_positions, average_velocities = _rk4_step_preview_positions(
+            positions,
+            targets,
+            velocity_command,
+            base_vel,
+            dt_s,
+        )
 
         for uav in preview_uavs:
-            vel = velocities[uav.uid]
-            uav.x_m += float(vel[0]) * dt_s
-            uav.y_m += float(vel[1]) * dt_s
+            uav.x_m = float(next_positions[uav.uid][0])
+            uav.y_m = float(next_positions[uav.uid][1])
+            vel = average_velocities[uav.uid]
             speed_mps = float(np.linalg.norm(vel))
             battery_state = battery_model.calculate_next_state(
                 discharge_progress=uav.discharge_progress,
@@ -240,6 +240,67 @@ def _all_arrived(
         if float(np.linalg.norm(target - current)) > arrival_tolerance_m:
             return False
     return True
+
+
+def _rk4_step_preview_positions(
+    positions: dict[str, np.ndarray],
+    targets: dict[str, np.ndarray],
+    velocity_command: VelocityCommand,
+    base_vel: np.ndarray,
+    dt_s: float,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    k1 = _preview_velocity_field(positions, targets, velocity_command, base_vel)
+    k2 = _preview_velocity_field(
+        _add_scaled_positions(positions, k1, dt_s * 0.5),
+        targets,
+        velocity_command,
+        base_vel,
+    )
+    k3 = _preview_velocity_field(
+        _add_scaled_positions(positions, k2, dt_s * 0.5),
+        targets,
+        velocity_command,
+        base_vel,
+    )
+    k4 = _preview_velocity_field(
+        _add_scaled_positions(positions, k3, dt_s),
+        targets,
+        velocity_command,
+        base_vel,
+    )
+
+    next_positions: dict[str, np.ndarray] = {}
+    average_velocities: dict[str, np.ndarray] = {}
+    for uid, pos in positions.items():
+        average_velocity = (k1[uid] + 2.0 * k2[uid] + 2.0 * k3[uid] + k4[uid]) / 6.0
+        next_positions[uid] = pos + average_velocity * dt_s
+        average_velocities[uid] = average_velocity
+    return next_positions, average_velocities
+
+
+def _preview_velocity_field(
+    positions: dict[str, np.ndarray],
+    targets: dict[str, np.ndarray],
+    velocity_command: VelocityCommand,
+    base_vel: np.ndarray,
+) -> dict[str, np.ndarray]:
+    velocities: dict[str, np.ndarray] = {}
+    for uid, current_pos in positions.items():
+        target_pos = targets[uid]
+        neighbors = [pos for other_uid, pos in positions.items() if other_uid != uid]
+        velocities[uid] = base_vel + velocity_command(current_pos, target_pos, neighbors)
+    return velocities
+
+
+def _add_scaled_positions(
+    positions: dict[str, np.ndarray],
+    velocities: dict[str, np.ndarray],
+    scale: float,
+) -> dict[str, np.ndarray]:
+    return {
+        uid: pos + velocities[uid] * scale
+        for uid, pos in positions.items()
+    }
 
 
 def _all_arrived_3d(
