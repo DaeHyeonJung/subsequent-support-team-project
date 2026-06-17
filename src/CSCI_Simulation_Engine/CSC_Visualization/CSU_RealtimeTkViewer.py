@@ -10,7 +10,12 @@ from tkinter import ttk
 
 from src.CSCI_Guidance_Control.CSC_CollisionAvoidance import PotentialField3DAvoidance
 from src.CSCI_Guidance_Control.CSC_Controller.CSU_HeadingController import HeadingController
+from src.CSCI_Guidance_Control.CSC_Controller.CSU_LateralSlotLQRController import (
+    LateralSlotLQRController,
+)
+from src.CSCI_Guidance_Control.CSC_Controller.CSU_VerticalLQRController import VerticalLQRController
 from src.CSCI_Guidance_Control.CSC_Guidance.CSU_BasicLOS3DGuidance import BasicLOS3DGuidance
+from src.CSCI_Guidance_Control.CSC_Guidance.CSU_SlotReferenceGenerator import SlotReferenceGenerator
 from src.CSCI_Reconfiguration_Decision.CSC_RolePriority import CandidatePriorityEvaluator, ROLE_PRIORITY_WEIGHT
 from src.CSCI_Reconfiguration_Decision.CSC_FormationManagement.CSU_FormationManager import (
     update_formation_assignments,
@@ -67,24 +72,18 @@ class RealtimeTkViewer:
         )
         self.basic_los_3d_guidance = BasicLOS3DGuidance(arrival_radius_m=4.0)
         self.collision_avoidance = PotentialField3DAvoidance()
-        self.slot_lateral_gain_rad_per_m = math.radians(0.8)
-        self.max_slot_heading_offset_rad = math.radians(18.0)
+        self.lateral_slot_lqr_controller = LateralSlotLQRController()
+        self.slot_reference_generator = SlotReferenceGenerator()
+        self.vertical_lqr_controller = VerticalLQRController()
         self.slot_along_velocity_gain = 0.35
         self.max_slot_along_velocity_correction_mps = 12.0
         self.max_slot_speed_boost_mps = 12.0
         self.max_slot_speed_reduction_mps = 8.0
         self.formation_slot_spacing_m = 15.0
-        self.altitude_gain_rad_per_m = math.radians(0.45)
-        self.vertical_speed_damping_rad_per_mps = math.radians(1.4)
-        self.avoidance_altitude_gain_rad_per_m = math.radians(0.45)
-        self.altitude_deadband_m = 0.35
-        self.max_guidance_flight_path_rad = math.radians(5.5)
 
         self.cfg = SimConfig(
             dt=0.05,
             duration=10_000.0,
-            speed_mps=15.0,
-            max_speed_mps=35.0 + self.max_slot_speed_boost_mps,
         )
 
         # Guidance Control 초기화
@@ -235,10 +234,14 @@ class RealtimeTkViewer:
         self.follow_check = ttk.Checkbutton(root, text="Follow", variable=self.follow_var, command=self.update_follow)
         self.follow_check.grid(row=0, column=4, padx=6, pady=8, sticky="ew")
 
-        ttk.Label(root, text="UAV Speed").grid(row=0, column=5, padx=6, pady=8, sticky="e")
+        ttk.Label(root, text="Cruise Speed").grid(row=0, column=5, padx=6, pady=8, sticky="e")
         self.speed_var = tk.DoubleVar(value=self.cfg.speed_mps)
-        self.speed_scale = ttk.Scale(root, from_=5.0, to=35.0, variable=self.speed_var, command=self.update_speed)
-        self.speed_scale.grid(row=0, column=6, columnspan=3, padx=6, pady=8, sticky="ew")
+        self.speed_label = ttk.Label(
+            root,
+            text=f"{self.cfg.cruise_speed_mps:.1f} m/s",
+            width=10,
+        )
+        self.speed_label.grid(row=0, column=6, columnspan=3, padx=6, pady=8, sticky="ew")
 
         self.status_var = tk.StringVar(value="")
         ttk.Label(root, textvariable=self.status_var, width=34).grid(
@@ -340,7 +343,7 @@ class RealtimeTkViewer:
             active_uavs,
             assignments,
             self.battery_model,
-            self.compute_virtual_structure_tracking_command,
+            self.compute_preview_virtual_structure_tracking_command,
             self.heading_controller,
             self.collision_avoidance,
             self.cfg,
@@ -586,10 +589,12 @@ class RealtimeTkViewer:
 
         if not shape_type:
             self.assignments = {}
+            self.slot_reference_generator.reset()
             return
 
         # 통합 매니저를 통해 알고리즘 수행
         active_uavs = [uav for uav in self.uavs if not self.is_killed_uav(uav)]
+        self.slot_reference_generator.reset()
         self.assignments = update_formation_assignments(
             active_uavs,
             shape_type,
@@ -636,6 +641,9 @@ class RealtimeTkViewer:
     def reset(self) -> None:
         self.finish_output_session()
         self.uavs = build_initial_uavs(self.speed_var.get())
+        self.vertical_lqr_controller.reset()
+        self.lateral_slot_lqr_controller.reset()
+        self.slot_reference_generator.reset()
         self.display_formation_ids = {uav.uid: uav.formation_id for uav in self.uavs}
         self.kill_event_model.reset()
         self.recent_kill_events.clear()
@@ -737,11 +745,12 @@ class RealtimeTkViewer:
             desired_heading_rad = math.radians(90.0)
             desired_flight_path_rad = 0.0
             speed_cmd_mps = current_formation_speed
+            roll_cmd_rad: float | None = None
 
             if uav.uid in self.assignments:
                 alloc = self.assignments[uav.uid]
                 avoidance_vector = self.collision_avoidance.compute_avoidance_vector(uav, self.uavs)
-                desired_heading_rad, desired_flight_path_rad, speed_cmd_mps = (
+                roll_cmd_rad, desired_flight_path_rad, speed_cmd_mps = (
                     self.compute_virtual_structure_tracking_command(
                         uav=uav,
                         target_x_m=alloc.target_x,
@@ -754,11 +763,12 @@ class RealtimeTkViewer:
                     )
                 )
 
-            roll_cmd_rad = self.heading_controller.compute_roll_command(
-                current_heading_rad=uav.heading_rad,
-                desired_heading_rad=desired_heading_rad,
-                speed_mps=uav.speed_mps,
-            )
+            if roll_cmd_rad is None:
+                roll_cmd_rad = self.heading_controller.compute_roll_command(
+                    current_heading_rad=uav.heading_rad,
+                    desired_heading_rad=desired_heading_rad,
+                    speed_mps=uav.speed_mps,
+                )
             step_uav(
                 uav,
                 roll_cmd_rad=roll_cmd_rad,
@@ -809,41 +819,64 @@ class RealtimeTkViewer:
         avoidance_x_m: float = 0.0,
         avoidance_y_m: float = 0.0,
         avoidance_z_m: float = 0.0,
+        update_vertical_lqr_state: bool = True,
+        update_lateral_lqr_state: bool = True,
+        update_slot_reference_state: bool = True,
     ) -> tuple[float, float, float]:
+        commanded_altitude_m = target_z_m + avoidance_z_m
         los_result = self.basic_los_3d_guidance.compute_desired_command(
             current_x_m=uav.x_m,
             current_y_m=uav.y_m,
             current_z_m=uav.z_m,
             target_x_m=target_x_m + avoidance_x_m,
             target_y_m=target_y_m + avoidance_y_m,
-            target_z_m=target_z_m + avoidance_z_m,
+            target_z_m=commanded_altitude_m,
             fallback_heading_rad=uav.heading_rad,
             fallback_flight_path_rad=uav.flight_path_rad,
         )
 
         cross_track_error_m = target_x_m - uav.x_m + avoidance_x_m
         along_track_error_m = target_y_m - uav.y_m + avoidance_y_m
-        altitude_error_m = target_z_m - uav.z_m + avoidance_z_m
 
-        heading_offset_rad = -self.slot_lateral_gain_rad_per_m * cross_track_error_m
-        heading_offset_rad = max(
-            -self.max_slot_heading_offset_rad,
-            min(heading_offset_rad, self.max_slot_heading_offset_rad),
+        if update_slot_reference_state:
+            smoothed_target_x_m = self.slot_reference_generator.update_lateral_reference(
+                uid=uav.uid,
+                current_x_m=uav.x_m,
+                final_target_x_m=target_x_m,
+                dt_s=self.cfg.dt,
+                update_state=True,
+            )
+        else:
+            smoothed_target_x_m = target_x_m
+        commanded_lateral_position_m = smoothed_target_x_m + avoidance_x_m
+        roll_cmd_rad = self.lateral_slot_lqr_controller.compute_roll_command(
+            lateral_position_m=uav.x_m,
+            commanded_lateral_position_m=commanded_lateral_position_m,
+            speed_mps=uav.speed_mps,
+            heading_rad=uav.heading_rad,
+            roll_rad=uav.roll_rad,
+            roll_rate_rad_s=uav.roll_rate_rad_s,
+            gravity_mps2=self.cfg.gravity_mps2,
+            roll_pd_kp=self.cfg.roll_pd_kp,
+            roll_pd_kd=self.cfg.roll_pd_kd,
+            dt_s=self.cfg.dt,
+            command_id=uav.uid,
+            update_state=update_lateral_lqr_state,
+            apply_rate_limit=update_lateral_lqr_state,
         )
-        desired_heading_rad = math.radians(90.0) + heading_offset_rad
-        if los_result.arrived and abs(cross_track_error_m) < 0.5:
-            desired_heading_rad = uav.heading_rad
 
-        if abs(altitude_error_m) < self.altitude_deadband_m:
-            altitude_error_m = 0.0
-        vertical_speed_mps = uav.speed_mps * math.sin(uav.flight_path_rad)
-        desired_flight_path_rad = (
-            self.altitude_gain_rad_per_m * altitude_error_m
-            - self.vertical_speed_damping_rad_per_mps * vertical_speed_mps
-        )
-        desired_flight_path_rad = max(
-            -self.max_guidance_flight_path_rad,
-            min(desired_flight_path_rad, self.max_guidance_flight_path_rad),
+        desired_flight_path_rad = self.vertical_lqr_controller.compute_flight_path_command(
+            altitude_m=uav.z_m,
+            commanded_altitude_m=commanded_altitude_m,
+            speed_mps=uav.speed_mps,
+            flight_path_rad=uav.flight_path_rad,
+            flight_path_rate_rad_s=uav.flight_path_rate_rad_s,
+            flight_path_kp=self.cfg.flight_path_kp,
+            flight_path_kd=self.cfg.flight_path_kd,
+            dt_s=self.cfg.dt,
+            command_id=uav.uid,
+            update_state=update_vertical_lqr_state,
+            apply_rate_limit=update_vertical_lqr_state,
         )
 
         along_velocity_correction_mps = self.slot_along_velocity_gain * along_track_error_m
@@ -852,14 +885,39 @@ class RealtimeTkViewer:
             min(along_velocity_correction_mps, self.max_slot_along_velocity_correction_mps),
         )
         desired_y_velocity_mps = cruise_speed_mps + along_velocity_correction_mps
-        forward_projection = max(math.sin(desired_heading_rad), 0.25)
+        forward_projection = max(math.sin(uav.heading_rad), 0.25)
         speed_cmd_mps = desired_y_velocity_mps / forward_projection
 
         min_slot_speed_mps = max(self.cfg.min_speed_mps, cruise_speed_mps - self.max_slot_speed_reduction_mps)
         max_slot_speed_mps = min(self.cfg.max_speed_mps, cruise_speed_mps + self.max_slot_speed_boost_mps)
         speed_cmd_mps = max(min_slot_speed_mps, min(speed_cmd_mps, max_slot_speed_mps))
 
-        return desired_heading_rad, desired_flight_path_rad, speed_cmd_mps
+        return roll_cmd_rad, desired_flight_path_rad, speed_cmd_mps
+
+    def compute_preview_virtual_structure_tracking_command(
+        self,
+        uav: UavState,
+        target_x_m: float,
+        target_y_m: float,
+        target_z_m: float,
+        cruise_speed_mps: float,
+        avoidance_x_m: float = 0.0,
+        avoidance_y_m: float = 0.0,
+        avoidance_z_m: float = 0.0,
+    ) -> tuple[float, float, float]:
+        return self.compute_virtual_structure_tracking_command(
+            uav=uav,
+            target_x_m=target_x_m,
+            target_y_m=target_y_m,
+            target_z_m=target_z_m,
+            cruise_speed_mps=cruise_speed_mps,
+            avoidance_x_m=avoidance_x_m,
+            avoidance_y_m=avoidance_y_m,
+            avoidance_z_m=avoidance_z_m,
+            update_vertical_lqr_state=False,
+            update_lateral_lqr_state=False,
+            update_slot_reference_state=False,
+        )
 
     @staticmethod
     def is_killed_uav(uav: UavState) -> bool:
