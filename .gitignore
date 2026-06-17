@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 outputs/
 test file/
+analyze_collision_metrics.py
+analyze_maneuver_metrics.py
