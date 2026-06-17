@@ -11,9 +11,15 @@ class UavTelemetryMessage:
     role: str
     x_m: float
     y_m: float
+    z_m: float
     heading_rad: float
+    flight_path_rad: float
     speed_mps: float
+    longitudinal_accel_mps2: float
+    vertical_accel_mps2: float
     roll_rad: float
+    roll_rate_rad_s: float
+    flight_path_rate_rad_s: float
     battery_pct: float
     battery_discharge_progress: float
     cell_voltage_v: float
