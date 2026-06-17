@@ -36,12 +36,6 @@ pip install matplotlib
 
 ## 실행 방법
 
-프로젝트 루트에서 실행합니다.
-
-```powershell
-cd C:\Users\DaeHyeon\Desktop\subsequent-support-team-project
-```
-
 기본 배치 시뮬레이션:
 
 ```powershell
@@ -188,6 +182,3 @@ src/
 - `Sim_run.bat`: Windows 배치 실행 파일
 - `test_visualize_algorithms.py`: 알고리즘 시각화/스모크 테스트용 파일
 
-## Git 참고
-
-`outputs/`, Python cache, 분석 후처리 스크립트 등은 `.gitignore`에서 제외합니다. 시뮬레이션 결과 파일은 로컬에서 생성해 확인하고 Git에는 올리지 않는 흐름을 권장합니다.
