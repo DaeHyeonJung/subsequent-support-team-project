@@ -8,10 +8,6 @@ from src.CSCI_Guidance_Control.CSC_Controller.CSU_SpeedController import SpeedCo
 from src.CSCI_Simulation_Engine.CSC_Configuration.CSU_SimConfig import SimConfig
 from src.CSCI_Simulation_Engine.CSC_Models.CSU_UavState import UavState
 
-
-G = 9.80665
-
-
 @dataclass(frozen=True)
 class _DynamicsState:
     x_m: float
@@ -192,7 +188,11 @@ def _state_derivative(
     max_roll_accel_rad_s2 = math.radians(cfg.max_roll_accel_deg_s2)
     roll_accel_rad_s2 = clamp(roll_accel_rad_s2, -max_roll_accel_rad_s2, max_roll_accel_rad_s2)
 
-    yaw_rate_rad_s = G / max(speed_mps * max(math.cos(flight_path_rad), 0.2), 1.0) * math.tan(roll_rad)
+    yaw_rate_rad_s = (
+        cfg.gravity_mps2
+        / max(speed_mps * max(math.cos(flight_path_rad), 0.2), 1.0)
+        * math.tan(roll_rad)
+    )
     horizontal_speed_mps = speed_mps * math.cos(flight_path_rad)
 
     return _DynamicsState(
@@ -254,5 +254,12 @@ def _calculate_vertical_accel(state: _DynamicsState, cfg: SimConfig) -> float:
     speed_mps = clamp(state.speed_mps, cfg.min_speed_mps, cfg.max_speed_mps)
     dynamic_pressure_pa = 0.5 * cfg.air_density_kg_m3 * speed_mps * speed_mps
     lift_n = dynamic_pressure_pa * cfg.wing_area_m2 * cfg.lift_coefficient
-    force_vertical_n = lift_n * math.cos(state.roll_rad) - cfg.aircraft_mass_kg * G * math.cos(state.flight_path_rad)
+    drag_n = dynamic_pressure_pa * cfg.wing_area_m2 * cfg.drag_coefficient
+    thrust_n = cfg.thrust_coefficient * cfg.air_density_kg_m3 * cfg.wing_area_m2 * speed_mps * speed_mps
+    force_vertical_n = (
+        lift_n * math.cos(state.roll_rad)
+        - cfg.aircraft_mass_kg * cfg.gravity_mps2 * math.cos(state.flight_path_rad)
+    )
+    _ = drag_n
+    _ = thrust_n
     return force_vertical_n / max(cfg.aircraft_mass_kg, 1e-6)

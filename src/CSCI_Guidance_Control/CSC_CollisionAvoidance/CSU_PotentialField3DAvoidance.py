@@ -32,8 +32,8 @@ class PotentialFieldVector3D:
 @dataclass(frozen=True)
 class PotentialField3DConfig:
     protected_radius_m: float = 7.0
-    command_radius_m: float = 9.5
-    activation_radius_m: float = 32.0
+    command_radius_m: float = 8.0
+    activation_radius_m: float = 24.0
     lookahead_time_s: float = 8.0
     minimum_distance_m: float = 1.0
     repulsive_gain_m: float = 8.0
@@ -88,11 +88,14 @@ class PotentialField3DAvoidance:
 
             if distance_now_m > self.config.activation_radius_m and closest_distance_m > self.config.command_radius_m:
                 continue
-            if time_to_cpa_s <= 1e-6 and distance_now_m > self.config.command_radius_m:
+
+            current_intrusion = distance_now_m < self.config.command_radius_m
+            closing_risk = time_to_cpa_s > 1e-6 and closest_distance_m < self.config.command_radius_m
+            if not current_intrusion and not closing_risk:
                 continue
 
-            risk_distance_m = min(distance_now_m, closest_distance_m)
-            is_emergency = risk_distance_m < self.config.command_radius_m
+            risk_distance_m = min(distance_now_m, closest_distance_m) if closing_risk else distance_now_m
+            is_emergency = risk_distance_m < self.config.protected_radius_m
 
             if closest_distance_m < distance_now_m:
                 dx_m, dy_m, dz_m = closest_dx_m, closest_dy_m, closest_dz_m
@@ -117,7 +120,7 @@ class PotentialField3DAvoidance:
                 continue
 
             safe_distance_m = max(distance_m, self.config.minimum_distance_m)
-            urgency = max(0.0, 1.0 - time_to_cpa_s / max(self.config.lookahead_time_s, 1e-6))
+            urgency = max(0.0, 1.0 - time_to_cpa_s / max(self.config.lookahead_time_s, 1e-6)) if closing_risk else 0.0
             protected_term = max(0.0, self.config.command_radius_m / safe_distance_m - 1.0)
             activation_term = max(0.0, (self.config.activation_radius_m - safe_distance_m) / self.config.activation_radius_m)
             magnitude_m = self.config.repulsive_gain_m * (protected_term + urgency * activation_term)
